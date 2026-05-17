@@ -206,6 +206,10 @@ impl Net {
         }
     }
 
+    fn mutate(&mut self, amount: f32, rng: &mut Rng) {
+        self.layers.iter_mut().for_each(|l| l.mutate(amount, rng));
+    }
+
     fn set_inputs(&mut self, inputs: &[f32]) {
         assert_eq!(self.layers[0].neurons.len(), inputs.len());
         for (neuron, input) in self.layers[0].neurons.iter_mut().zip(inputs) {
@@ -271,6 +275,10 @@ impl Layer {
         }
     }
 
+    fn mutate(&mut self, amount: f32, rng: &mut Rng) {
+        self.neurons.iter_mut().for_each(|n| n.mutate(amount, rng));
+    }
+
     fn eval(&mut self, prev: &Self) {
         for neuron in &mut self.neurons {
             neuron.eval(prev, self.activation_fn);
@@ -319,6 +327,15 @@ impl Neuron {
                 .collect(),
             bias: if rng.bool() { self.bias } else { other.bias },
         }
+    }
+
+    fn mutate(&mut self, amount: f32, rng: &mut Rng) {
+        self.weights.iter_mut().for_each(|w| {
+            *w += rng.f32() * amount * Self::INIT_MAX - 0.5 * amount * Self::INIT_MAX;
+            *w = w.clamp(-1.5 * Self::INIT_MAX, 1.5 * Self::INIT_MAX);
+        });
+        self.bias += rng.f32() * amount * Self::INIT_MAX - 0.5 * amount * Self::INIT_MAX;
+        self.bias = self.bias.clamp(-1.5 * Self::INIT_MAX, 1.5 * Self::INIT_MAX);
     }
 
     fn eval(&mut self, prev: &Layer, activation_fn: ActivationFn) {
@@ -562,7 +579,8 @@ fn finish_generation(
         }
         let net1 = rng.u64() as usize % survivers.len();
         let net2 = rng.u64() as usize % survivers.len();
-        let net = survivers[net1].mix(survivers[net2], &mut rng);
+        let mut net = survivers[net1].mix(survivers[net2], &mut rng);
+        net.mutate(0.05, &mut rng);
         commands.run_system_cached_with(CellEntity::spawn, CellEntity { x, y, net });
     }
     tick.0 = 0;
