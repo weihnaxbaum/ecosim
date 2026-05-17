@@ -13,8 +13,9 @@ fn main() -> AppExit {
             Update,
             (tick, CellEntity::update_tf)
                 .chain()
-                .run_if(on_timer(Duration::from_secs_f32(0.1))),
+                .run_if(on_timer(Duration::from_secs_f32(0.0))),
         )
+        .add_observer(finish_generation)
         .run()
 }
 
@@ -126,17 +127,16 @@ struct CellEntity {
 
 impl CellEntity {
     fn spawn(
-        In((x, y)): In<(u16, u16)>,
+        In(ce): In<Self>,
         mut commands: Commands,
         square: Res<Square>,
         material: Res<CellEntityMaterial>,
         mut grid: ResMut<Grid>,
-        mut rng: ResMut<Rng>,
     ) {
-        let net = Net::random(&[8, 6, 5], &mut rng);
+        let (x, y) = (ce.x, ce.y);
         let id = commands
             .spawn((
-                Self { x, y, net },
+                ce,
                 Mesh2d(square.0.clone()),
                 MeshMaterial2d(material.0.clone()),
                 Transform {
@@ -169,19 +169,40 @@ impl Net {
         Net {
             layers: (0..layers.len())
                 .map(|i| {
-                    Layer::random(
-                        layers[i],
-                        if i == 0 { 0 } else { layers[i - 1] },
-                        if i == 0 || i == layers.len() - 1 {
-                            ActivationFn::Unchanged
-                        } else {
-                            ActivationFn::Relu
-                        },
-                        rng,
-                    )
+                    if i == 0 {
+                        Layer::input_layer(layers[0])
+                    } else {
+                        Layer::random(
+                            layers[i],
+                            layers[i - 1],
+                            if i == layers.len() - 1 {
+                                ActivationFn::Unchanged
+                            } else {
+                                ActivationFn::Relu
+                            },
+                            rng,
+                        )
+                    }
                 })
                 .collect(),
             temperature: 1.0,
+        }
+    }
+
+    fn mix(&self, other: &Net, rng: &mut Rng) -> Net {
+        assert_eq!(self.layers.len(), other.layers.len());
+        Net {
+            layers: self
+                .layers
+                .iter()
+                .zip(&other.layers)
+                .map(|(l1, l2)| l1.mix(l2, rng))
+                .collect(),
+            temperature: if rng.bool() {
+                self.temperature
+            } else {
+                other.temperature
+            },
         }
     }
 
@@ -226,6 +247,30 @@ impl Layer {
         }
     }
 
+    fn input_layer(size: usize) -> Self {
+        Self {
+            neurons: vec![Neuron::default(); size],
+            activation_fn: ActivationFn::Unchanged,
+        }
+    }
+
+    fn mix(&self, other: &Self, rng: &mut Rng) -> Self {
+        assert_eq!(self.neurons.len(), other.neurons.len());
+        Self {
+            neurons: self
+                .neurons
+                .iter()
+                .zip(&other.neurons)
+                .map(|(n1, n2)| n1.mix(n2, rng))
+                .collect(),
+            activation_fn: if rng.bool() {
+                self.activation_fn
+            } else {
+                other.activation_fn
+            },
+        }
+    }
+
     fn eval(&mut self, prev: &Self) {
         for neuron in &mut self.neurons {
             neuron.eval(prev, self.activation_fn);
@@ -240,6 +285,16 @@ struct Neuron {
     bias: f32,
 }
 
+impl Default for Neuron {
+    fn default() -> Self {
+        Self {
+            value: f32::NAN,
+            weights: vec![],
+            bias: f32::NAN,
+        }
+    }
+}
+
 impl Neuron {
     const INIT_MAX: f32 = 2.0;
 
@@ -247,9 +302,22 @@ impl Neuron {
         Self {
             value: f32::NAN,
             weights: (0..weight_count)
-                .map(|_| rng.get() as f32 / u64::MAX as f32 * 2.0 * Self::INIT_MAX - Self::INIT_MAX)
+                .map(|_| rng.f32() * 2.0 * Self::INIT_MAX - Self::INIT_MAX)
                 .collect(),
-            bias: rng.get() as f32 / u64::MAX as f32 * 2.0 * Self::INIT_MAX - Self::INIT_MAX,
+            bias: rng.f32() * 2.0 * Self::INIT_MAX - Self::INIT_MAX,
+        }
+    }
+
+    fn mix(&self, other: &Self, rng: &mut Rng) -> Self {
+        Self {
+            value: f32::NAN,
+            weights: self
+                .weights
+                .iter()
+                .zip(&other.weights)
+                .map(|(w1, w2)| if rng.bool() { *w1 } else { *w2 })
+                .collect(),
+            bias: if rng.bool() { self.bias } else { other.bias },
         }
     }
 
@@ -283,16 +351,34 @@ impl ActivationFn {
 struct Rng(u64);
 
 impl Rng {
-    fn get(&mut self) -> u64 {
+    fn u64(&mut self) -> u64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
         self.0
     }
+
+    /// 0.0..1.0
+    fn f32(&mut self) -> f32 {
+        self.u64() as f32 / u64::MAX as f32
+    }
+
+    fn bool(&mut self) -> bool {
+        self.u64() & 1 == 0
+    }
 }
 
 #[derive(Resource)]
 struct Tick(u32);
+
+#[derive(Resource)]
+struct Generation(u32);
+
+#[derive(Event)]
+struct FinishGeneration;
+
+#[derive(Component)]
+struct GenerationLabel;
 
 #[derive(Resource, Debug)]
 struct Square(Handle<Mesh>);
@@ -362,18 +448,30 @@ fn setup(
     commands.insert_resource(Grid([Cell::Empty; _]));
 
     let mut rng = Rng(1);
-    commands.insert_resource(rng);
 
     let mut pos = HashSet::with_capacity(ENTITY_COUNT);
     for _ in 0..ENTITY_COUNT {
-        let x = rng.get() as u16 % GRID_SIZE;
-        let y = rng.get() as u16 % GRID_SIZE;
+        let x = rng.u64() as u16 % GRID_SIZE;
+        let y = rng.u64() as u16 % GRID_SIZE;
         if pos.insert((x, y)) {
-            commands.run_system_cached_with(CellEntity::spawn, (x, y));
+            let net = Net::random(&[8, 6, 5], &mut rng);
+            commands.run_system_cached_with(CellEntity::spawn, CellEntity { x, y, net });
         }
     }
 
+    commands.insert_resource(rng);
     commands.insert_resource(Tick(0));
+    commands.insert_resource(Generation(0));
+
+    commands.spawn((
+        GenerationLabel,
+        Text2d::new("Generation 0"),
+        TextFont {
+            font_size: 60.0,
+            ..default()
+        },
+        Transform::from_xyz(0.0, WIN_HEIGHT - 100.0, 2.0),
+    ));
 }
 
 fn tick(
@@ -381,19 +479,16 @@ fn tick(
     mut grid: ResMut<Grid>,
     mut rng: ResMut<Rng>,
     mut tick: ResMut<Tick>,
+    mut commands: Commands,
 ) {
     if tick.0 >= TICKS {
+        commands.trigger(FinishGeneration);
         return;
     }
     for mut ce in &mut ce_q {
         let x = ce.x as f32 / GRID_SIZE as f32;
         let y = ce.y as f32 / GRID_SIZE as f32;
-        let mut inputs = vec![
-            x,
-            y,
-            tick.0 as f32 / TICKS as f32,
-            rng.get() as f32 / u64::MAX as f32,
-        ];
+        let mut inputs = vec![x, y, tick.0 as f32 / TICKS as f32, rng.f32()];
         for dir in DIRS {
             inputs.push(
                 if let Some((x, y)) = dir.apply(ce.x, ce.y)
@@ -407,7 +502,7 @@ fn tick(
         }
         ce.net.set_inputs(&inputs);
         ce.net.eval();
-        let rand = rng.get() as f32 / u64::MAX as f32;
+        let rand = rng.f32();
         let mut i = -1;
         let mut sum = 0.0;
         while sum < rand {
@@ -426,4 +521,49 @@ fn tick(
         }
     }
     tick.0 += 1;
+}
+
+fn finish_generation(
+    _: On<FinishGeneration>,
+    mut generation: ResMut<Generation>,
+    mut gen_label: Single<&mut Text2d, With<GenerationLabel>>,
+    ce_q: Query<(Entity, &CellEntity)>,
+    mut commands: Commands,
+    mut rng: ResMut<Rng>,
+    mut tick: ResMut<Tick>,
+) {
+    generation.0 += 1;
+    gen_label.0 = format!("Generation {}", generation.0);
+
+    let mut survivers = vec![];
+    for (e, ce) in &ce_q {
+        commands.entity(e).despawn();
+        if ce.x > GRID_SIZE / 2 {
+            survivers.push(&ce.net);
+        }
+    }
+    dbg!(survivers.len());
+    dbg!(
+        survivers[0]
+            .layers
+            .last()
+            .unwrap()
+            .neurons
+            .iter()
+            .map(|n| n.value)
+            .collect::<Vec<_>>()
+    );
+    let mut pos = HashSet::with_capacity(ENTITY_COUNT);
+    for _ in 0..ENTITY_COUNT {
+        let x = rng.u64() as u16 % GRID_SIZE;
+        let y = rng.u64() as u16 % GRID_SIZE;
+        if !pos.insert((x, y)) {
+            continue;
+        }
+        let net1 = rng.u64() as usize % survivers.len();
+        let net2 = rng.u64() as usize % survivers.len();
+        let net = survivers[net1].mix(survivers[net2], &mut rng);
+        commands.run_system_cached_with(CellEntity::spawn, CellEntity { x, y, net });
+    }
+    tick.0 = 0;
 }
