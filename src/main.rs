@@ -11,7 +11,7 @@ fn main() -> AppExit {
         .add_systems(Startup, setup)
         .add_systems(
             Update,
-            (move_right, CellEntity::update_tf)
+            (tick, CellEntity::update_tf)
                 .chain()
                 .run_if(on_timer(Duration::from_secs_f32(0.1))),
         )
@@ -24,8 +24,9 @@ const GRID_SIZE: u16 = 50;
 const CELL_PX: f32 = 20.0;
 const LINE_WIDTH: f32 = 3.0;
 const ENTITY_COUNT: usize = 100;
+const TICKS: u32 = 100;
 
-#[derive(Resource)]
+#[derive(Resource, Clone, Debug)]
 struct Grid([Cell; GRID_SIZE as usize * GRID_SIZE as usize]);
 
 impl Grid {
@@ -65,6 +66,9 @@ impl Grid {
     }
 }
 
+const DIRS: [Dir; 4] = [Dir::Up, Dir::Down, Dir::Left, Dir::Right];
+
+#[derive(Clone, Copy, Debug)]
 enum Dir {
     Up,
     Down,
@@ -107,14 +111,18 @@ impl Dir {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Cell {
     Empty,
     Entity(Entity),
 }
 
-#[derive(Component)]
-struct CellEntity(u16, u16);
+#[derive(Component, Clone, Debug)]
+struct CellEntity {
+    x: u16,
+    y: u16,
+    net: Net,
+}
 
 impl CellEntity {
     fn spawn(
@@ -123,10 +131,12 @@ impl CellEntity {
         square: Res<Square>,
         material: Res<CellEntityMaterial>,
         mut grid: ResMut<Grid>,
+        mut rng: ResMut<Rng>,
     ) {
+        let net = Net::random(&[8, 6, 5], &mut rng);
         let id = commands
             .spawn((
-                Self(x, y),
+                Self { x, y, net },
                 Mesh2d(square.0.clone()),
                 MeshMaterial2d(material.0.clone()),
                 Transform {
@@ -140,18 +150,154 @@ impl CellEntity {
     }
 
     fn update_tf(mut q: Query<(&mut Transform, &Self), Changed<Self>>) {
-        for (mut tf, Self(x, y)) in &mut q {
-            let pos = Grid::world_pos_from_grid_pos(*x, *y);
+        for (mut tf, ce) in &mut q {
+            let pos = Grid::world_pos_from_grid_pos(ce.x, ce.y);
             tf.translation.x = pos.x;
             tf.translation.y = pos.y;
         }
     }
 }
 
-#[derive(Resource)]
-struct Square(Handle<Mesh>);
+#[derive(Clone, Debug)]
+struct Net {
+    layers: Vec<Layer>,
+    temperature: f32,
+}
+
+impl Net {
+    fn random(layers: &[usize], rng: &mut Rng) -> Net {
+        Net {
+            layers: (0..layers.len())
+                .map(|i| {
+                    Layer::random(
+                        layers[i],
+                        if i == 0 { 0 } else { layers[i - 1] },
+                        if i == 0 || i == layers.len() - 1 {
+                            ActivationFn::Unchanged
+                        } else {
+                            ActivationFn::Relu
+                        },
+                        rng,
+                    )
+                })
+                .collect(),
+            temperature: 1.0,
+        }
+    }
+
+    fn set_inputs(&mut self, inputs: &[f32]) {
+        assert_eq!(self.layers[0].neurons.len(), inputs.len());
+        for (neuron, input) in self.layers[0].neurons.iter_mut().zip(inputs) {
+            neuron.value = *input;
+        }
+    }
+
+    fn eval(&mut self) {
+        for i in 1..self.layers.len() {
+            let [current, prev] = self.layers.get_disjoint_mut([i, i - 1]).unwrap();
+            current.eval(prev);
+        }
+        // softmax
+        let output_neurons = &mut self.layers.last_mut().unwrap().neurons;
+        let mut sum = 0.0;
+        let mut softmax = Vec::with_capacity(output_neurons.len());
+        for neuron in output_neurons.iter() {
+            let v = (neuron.value / self.temperature).exp();
+            sum += v;
+            softmax.push(v);
+        }
+        for (neuron, softmax) in output_neurons.iter_mut().zip(softmax) {
+            neuron.value = softmax / sum;
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Layer {
+    neurons: Vec<Neuron>,
+    activation_fn: ActivationFn,
+}
+
+impl Layer {
+    fn random(size: usize, prev_size: usize, activation_fn: ActivationFn, rng: &mut Rng) -> Self {
+        Self {
+            neurons: (0..size).map(|_| Neuron::random(prev_size, rng)).collect(),
+            activation_fn,
+        }
+    }
+
+    fn eval(&mut self, prev: &Self) {
+        for neuron in &mut self.neurons {
+            neuron.eval(prev, self.activation_fn);
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Neuron {
+    value: f32,
+    weights: Vec<f32>,
+    bias: f32,
+}
+
+impl Neuron {
+    const INIT_MAX: f32 = 2.0;
+
+    fn random(weight_count: usize, rng: &mut Rng) -> Self {
+        Self {
+            value: f32::NAN,
+            weights: (0..weight_count)
+                .map(|_| rng.get() as f32 / u64::MAX as f32 * 2.0 * Self::INIT_MAX - Self::INIT_MAX)
+                .collect(),
+            bias: rng.get() as f32 / u64::MAX as f32 * 2.0 * Self::INIT_MAX - Self::INIT_MAX,
+        }
+    }
+
+    fn eval(&mut self, prev: &Layer, activation_fn: ActivationFn) {
+        let sum = prev
+            .neurons
+            .iter()
+            .enumerate()
+            .map(|(i, n)| n.value * self.weights[i])
+            .sum::<f32>();
+        self.value = activation_fn.eval(sum + self.bias);
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ActivationFn {
+    Unchanged,
+    Relu,
+}
+
+impl ActivationFn {
+    fn eval(self, x: f32) -> f32 {
+        match self {
+            Self::Unchanged => x,
+            Self::Relu => x.max(0.0),
+        }
+    }
+}
+
+#[derive(Resource, Clone, Copy, Debug)]
+struct Rng(u64);
+
+impl Rng {
+    fn get(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+}
 
 #[derive(Resource)]
+struct Tick(u32);
+
+#[derive(Resource, Debug)]
+struct Square(Handle<Mesh>);
+
+#[derive(Resource, Debug)]
 struct CellEntityMaterial(Handle<ColorMaterial>);
 
 fn setup(
@@ -215,28 +361,69 @@ fn setup(
 
     commands.insert_resource(Grid([Cell::Empty; _]));
 
-    let mut seed = 1;
+    let mut rng = Rng(1);
+    commands.insert_resource(rng);
+
     let mut pos = HashSet::with_capacity(ENTITY_COUNT);
     for _ in 0..ENTITY_COUNT {
-        let x = rand(&mut seed) as u16 % GRID_SIZE;
-        let y = rand(&mut seed) as u16 % GRID_SIZE;
+        let x = rng.get() as u16 % GRID_SIZE;
+        let y = rng.get() as u16 % GRID_SIZE;
         if pos.insert((x, y)) {
             commands.run_system_cached_with(CellEntity::spawn, (x, y));
         }
     }
+
+    commands.insert_resource(Tick(0));
 }
 
-fn rand(x: &mut u64) -> u64 {
-    *x ^= *x << 13;
-    *x ^= *x >> 7;
-    *x ^= *x << 17;
-    *x
-}
-
-fn move_right(mut q: Query<&mut CellEntity>, mut grid: ResMut<Grid>) {
-    for mut ce in &mut q {
-        if grid.get(ce.0 + 1, ce.1) == Some(Cell::Empty) && grid.move_cell(ce.0, ce.1, Dir::Right) {
-            ce.0 += 1;
+fn tick(
+    mut ce_q: Query<&mut CellEntity>,
+    mut grid: ResMut<Grid>,
+    mut rng: ResMut<Rng>,
+    mut tick: ResMut<Tick>,
+) {
+    if tick.0 >= TICKS {
+        return;
+    }
+    for mut ce in &mut ce_q {
+        let x = ce.x as f32 / GRID_SIZE as f32;
+        let y = ce.y as f32 / GRID_SIZE as f32;
+        let mut inputs = vec![
+            x,
+            y,
+            tick.0 as f32 / TICKS as f32,
+            rng.get() as f32 / u64::MAX as f32,
+        ];
+        for dir in DIRS {
+            inputs.push(
+                if let Some((x, y)) = dir.apply(ce.x, ce.y)
+                    && grid.get(x, y) == Some(Cell::Empty)
+                {
+                    1.0
+                } else {
+                    0.0
+                },
+            );
+        }
+        ce.net.set_inputs(&inputs);
+        ce.net.eval();
+        let rand = rng.get() as f32 / u64::MAX as f32;
+        let mut i = -1;
+        let mut sum = 0.0;
+        while sum < rand {
+            i += 1;
+            sum += ce.net.layers.last().unwrap().neurons[i as usize].value;
+        }
+        let Some(dir) = DIRS.get(i as usize) else {
+            continue;
+        };
+        if let Some((x, y)) = dir.apply(ce.x, ce.y)
+            && grid.get(x, y) == Some(Cell::Empty)
+        {
+            grid.move_cell(ce.x, ce.y, *dir);
+            ce.x = x;
+            ce.y = y;
         }
     }
+    tick.0 += 1;
 }
