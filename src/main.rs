@@ -484,10 +484,10 @@ fn setup(
         GenerationLabel,
         Text2d::new("Generation 0"),
         TextFont {
-            font_size: 60.0,
+            font_size: 40.0,
             ..default()
         },
-        Transform::from_xyz(0.0, WIN_HEIGHT - 100.0, 2.0),
+        Transform::from_xyz(250.0, WIN_HEIGHT / 2.0 - 30.0, 2.0),
     ));
 }
 
