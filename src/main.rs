@@ -210,6 +210,19 @@ impl Net {
         self.layers.iter_mut().for_each(|l| l.mutate(amount, rng));
     }
 
+    fn avg(nets: &[&Net]) -> Net {
+        assert!(!nets.is_empty());
+        for net in nets.iter().skip(1) {
+            assert_eq!(net.layers.len(), nets[0].layers.len());
+        }
+        Net {
+            layers: (0..nets[0].layers.len())
+                .map(|i| Layer::avg(&nets.iter().map(|n| &n.layers[i]).collect::<Vec<_>>()))
+                .collect(),
+            temperature: nets.iter().map(|n| n.temperature).sum::<f32>() / nets.len() as f32,
+        }
+    }
+
     fn set_inputs(&mut self, inputs: &[f32]) {
         assert_eq!(self.layers[0].neurons.len(), inputs.len());
         for (neuron, input) in self.layers[0].neurons.iter_mut().zip(inputs) {
@@ -234,6 +247,18 @@ impl Net {
         for (neuron, softmax) in output_neurons.iter_mut().zip(softmax) {
             neuron.value = softmax / sum;
         }
+    }
+
+    fn flattened_properties(&self) -> Vec<f32> {
+        let mut vec: Vec<_> = self
+            .layers
+            .iter()
+            .skip(1)
+            .map(|l| l.flattened_properties())
+            .flatten()
+            .collect();
+        vec.push(self.temperature);
+        vec
     }
 }
 
@@ -279,10 +304,30 @@ impl Layer {
         self.neurons.iter_mut().for_each(|n| n.mutate(amount, rng));
     }
 
+    fn avg(layers: &[&Self]) -> Self {
+        for layer in layers.iter().skip(1) {
+            assert_eq!(layer.neurons.len(), layers[0].neurons.len());
+        }
+        Self {
+            neurons: (0..layers[0].neurons.len())
+                .map(|i| Neuron::avg(&layers.iter().map(|l| &l.neurons[i]).collect::<Vec<_>>()))
+                .collect(),
+            activation_fn: layers[0].activation_fn,
+        }
+    }
+
     fn eval(&mut self, prev: &Self) {
         for neuron in &mut self.neurons {
             neuron.eval(prev, self.activation_fn);
         }
+    }
+
+    fn flattened_properties(&self) -> Vec<f32> {
+        self.neurons
+            .iter()
+            .map(|n| n.flattened_properties())
+            .flatten()
+            .collect()
     }
 }
 
@@ -338,6 +383,16 @@ impl Neuron {
         self.bias = self.bias.clamp(-1.5 * Self::INIT_MAX, 1.5 * Self::INIT_MAX);
     }
 
+    fn avg(neurons: &[&Self]) -> Self {
+        Self {
+            value: f32::NAN,
+            weights: (0..neurons[0].weights.len())
+                .map(|i| neurons.iter().map(|n| n.weights[i]).sum::<f32>() / neurons.len() as f32)
+                .collect(),
+            bias: neurons.iter().map(|n| n.bias).sum::<f32>() / neurons.len() as f32,
+        }
+    }
+
     fn eval(&mut self, prev: &Layer, activation_fn: ActivationFn) {
         let sum = prev
             .neurons
@@ -346,6 +401,12 @@ impl Neuron {
             .map(|(i, n)| n.value * self.weights[i])
             .sum::<f32>();
         self.value = activation_fn.eval(sum + self.bias);
+    }
+
+    fn flattened_properties(&self) -> Vec<f32> {
+        let mut vec = self.weights.clone();
+        vec.push(self.bias);
+        vec
     }
 }
 
@@ -396,6 +457,32 @@ struct FinishGeneration;
 
 #[derive(Component)]
 struct GenerationLabel;
+
+#[derive(Component)]
+struct DiversityLabel;
+
+impl DiversityLabel {
+    fn text(nets: &[&Net]) -> String {
+        format!("Diversity: {:.3}", Self::calc(nets))
+    }
+
+    // mean of root mean square deviations
+    fn calc(nets: &[&Net]) -> f32 {
+        let avg_net = Net::avg(nets).flattened_properties();
+        let sum = nets
+            .iter()
+            .map(|n| {
+                n.flattened_properties()
+                    .iter()
+                    .zip(&avg_net)
+                    .map(|(v, avg)| (v - avg) * (v - avg))
+                    .sum::<f32>()
+                    .sqrt()
+            })
+            .sum::<f32>();
+        sum / nets.len() as f32 / (avg_net.len() as f32).sqrt()
+    }
+}
 
 #[derive(Resource, Debug)]
 struct Square(Handle<Mesh>);
@@ -467,12 +554,13 @@ fn setup(
     let mut rng = Rng(1);
 
     let mut pos = HashSet::with_capacity(ENTITY_COUNT);
+    let mut ce = Vec::with_capacity(ENTITY_COUNT);
     for _ in 0..ENTITY_COUNT {
         let x = rng.u64() as u16 % GRID_SIZE;
         let y = rng.u64() as u16 % GRID_SIZE;
         if pos.insert((x, y)) {
             let net = Net::random(&[8, 6, 5], &mut rng);
-            commands.run_system_cached_with(CellEntity::spawn, CellEntity { x, y, net });
+            ce.push(CellEntity { x, y, net });
         }
     }
 
@@ -489,6 +577,21 @@ fn setup(
         },
         Transform::from_xyz(250.0, WIN_HEIGHT / 2.0 - 30.0, 2.0),
     ));
+
+    commands.spawn((
+        DiversityLabel,
+        Text2d(DiversityLabel::text(
+            &ce.iter().map(|ce| &ce.net).collect::<Vec<_>>(),
+        )),
+        TextFont {
+            font_size: 40.0,
+            ..default()
+        },
+        Transform::from_xyz(300.0, WIN_HEIGHT / 2.0 - 80.0, 2.0),
+    ));
+
+    ce.into_iter()
+        .for_each(|ce| commands.run_system_cached_with(CellEntity::spawn, ce));
 }
 
 fn tick(
@@ -547,6 +650,7 @@ fn finish_generation(
     ce_q: Query<(Entity, &CellEntity)>,
     mut commands: Commands,
     mut rng: ResMut<Rng>,
+    mut diversity_label: Single<&mut Text2d, (With<DiversityLabel>, Without<GenerationLabel>)>,
     mut tick: ResMut<Tick>,
 ) {
     generation.0 += 1;
@@ -571,6 +675,7 @@ fn finish_generation(
             .collect::<Vec<_>>()
     );
     let mut pos = HashSet::with_capacity(ENTITY_COUNT);
+    let mut ce = Vec::with_capacity(ENTITY_COUNT);
     for _ in 0..ENTITY_COUNT {
         let x = rng.u64() as u16 % GRID_SIZE;
         let y = rng.u64() as u16 % GRID_SIZE;
@@ -581,7 +686,13 @@ fn finish_generation(
         let net2 = rng.u64() as usize % survivers.len();
         let mut net = survivers[net1].mix(survivers[net2], &mut rng);
         net.mutate(0.05, &mut rng);
-        commands.run_system_cached_with(CellEntity::spawn, CellEntity { x, y, net });
+        ce.push(CellEntity { x, y, net });
     }
+
+    diversity_label.0 = DiversityLabel::text(&ce.iter().map(|ce| &ce.net).collect::<Vec<_>>());
+
+    ce.into_iter()
+        .for_each(|ce| commands.run_system_cached_with(CellEntity::spawn, ce));
+
     tick.0 = 0;
 }
