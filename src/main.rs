@@ -691,6 +691,8 @@ fn finish_generation(
 
     diversity_label.0 = DiversityLabel::text(&ce.iter().map(|ce| &ce.net).collect::<Vec<_>>());
 
+    commands.insert_resource(Grid([Cell::Empty; _]));
+
     ce.into_iter()
         .for_each(|ce| commands.run_system_cached_with(CellEntity::spawn, ce));
 
