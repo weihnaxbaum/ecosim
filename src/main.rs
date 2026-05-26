@@ -703,16 +703,16 @@ fn finish_generation(
     generation.0 += 1;
     gen_label.0 = format!("Generation {}", generation.0);
 
-    let mut survivers = vec![];
+    let mut survivors = vec![];
     for (e, ce) in &ce_q {
         commands.entity(e).despawn();
         if ce.x > GRID_SIZE / 2 {
-            survivers.push(&ce.net);
+            survivors.push(&ce.net);
         }
     }
-    dbg!(survivers.len());
+    dbg!(survivors.len());
     dbg!(
-        survivers[0]
+        survivors[0]
             .layers
             .last()
             .unwrap()
@@ -729,9 +729,9 @@ fn finish_generation(
         if !pos.insert((x, y)) {
             continue;
         }
-        let net1 = rng.u64() as usize % survivers.len();
-        let net2 = rng.u64() as usize % survivers.len();
-        let mut net = survivers[net1].mix(survivers[net2], &mut rng);
+        let net1 = rng.u64() as usize % survivors.len();
+        let net2 = rng.u64() as usize % survivors.len();
+        let mut net = survivors[net1].mix(survivors[net2], &mut rng);
         net.mutate(&mut rng);
         ce.push(CellEntity { x, y, net });
     }
