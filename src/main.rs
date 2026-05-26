@@ -35,13 +35,6 @@ impl Grid {
             .cloned()
     }
 
-    fn pos_from_idx(i: usize) -> (u16, u16) {
-        (
-            (i % GRID_SIZE as usize) as u16,
-            (i / GRID_SIZE as usize) as u16,
-        )
-    }
-
     fn idx_from_pos(x: u16, y: u16) -> usize {
         x as usize + y as usize * GRID_SIZE as usize
     }
