@@ -1,20 +1,17 @@
-use std::time::Duration;
+use std::time::Instant;
 
 use bevy::{
-    camera::ScalingMode, platform::collections::HashSet, prelude::*,
-    time::common_conditions::on_timer,
+    camera::ScalingMode,
+    input::{ButtonState, keyboard::KeyboardInput},
+    platform::collections::HashSet,
+    prelude::*,
 };
 
 fn main() -> AppExit {
     App::new()
         .add_plugins(DefaultPlugins)
         .add_systems(Startup, setup)
-        .add_systems(
-            Update,
-            (tick, CellEntity::update_tf)
-                .chain()
-                .run_if(on_timer(Duration::from_secs_f32(0.0))),
-        )
+        .add_systems(Update, (run_sim, get_inputs))
         .add_observer(finish_generation)
         .run()
 }
@@ -26,6 +23,7 @@ const CELL_PX: f32 = 20.0;
 const LINE_WIDTH: f32 = 3.0;
 const ENTITY_COUNT: usize = 100;
 const TICKS: u32 = 100;
+const MIN_FPS: f32 = 60.0;
 
 #[derive(Resource, Clone, Debug)]
 struct Grid([Cell; GRID_SIZE as usize * GRID_SIZE as usize]);
@@ -464,6 +462,13 @@ impl Rng {
 #[derive(Resource)]
 struct Tick(u32);
 
+/// Ticks per second
+#[derive(Resource)]
+struct DesiredTps(f32);
+
+#[derive(Component)]
+struct TpsInput;
+
 #[derive(Resource)]
 struct Generation(u32);
 
@@ -598,6 +603,7 @@ fn setup(
 
     commands.insert_resource(rng);
     commands.insert_resource(Tick(0));
+    commands.insert_resource(DesiredTps(60.0));
     commands.insert_resource(Generation(0));
 
     commands.spawn((
@@ -642,8 +648,73 @@ fn setup(
         Transform::from_xyz(400.0, WIN_HEIGHT / 2.0 - 180.0, 2.0),
     ));
 
+    commands.spawn((
+        Text2d::new("Desired TPS:"),
+        TextFont {
+            font_size: 40.0,
+            ..default()
+        },
+        Transform::from_xyz(250.0, WIN_HEIGHT / 2.0 - 230.0, 2.0),
+    ));
+
+    commands.spawn((
+        TpsInput,
+        Text2d::default(),
+        TextFont {
+            font_size: 40.0,
+            ..default()
+        },
+        Transform::from_xyz(500.0, WIN_HEIGHT / 2.0 - 230.0, 2.0),
+    ));
+
     ce.into_iter()
         .for_each(|ce| commands.run_system_cached_with(CellEntity::spawn, ce));
+}
+
+fn run_sim(world: &mut World, mut time_acc: Local<f32>) -> Result {
+    *time_acc += world.resource::<Time>().delta_secs();
+    let spt = 1.0 / world.resource::<DesiredTps>().0;
+    if *time_acc < spt {
+        return Ok(());
+    }
+    let instant = Instant::now();
+    while *time_acc >= spt {
+        world.run_system_cached(tick)?;
+        if instant.elapsed().as_secs_f32() >= 1.0 / MIN_FPS {
+            *time_acc = 0.0;
+            break;
+        }
+        *time_acc -= spt;
+    }
+    world.run_system_cached(CellEntity::update_tf)?;
+    Ok(())
+}
+
+fn get_inputs(
+    mut kb: MessageReader<KeyboardInput>,
+    mut tps_input: Single<&mut Text2d, With<TpsInput>>,
+    mut tps: ResMut<DesiredTps>,
+) {
+    for ki in kb.read() {
+        if ki.state == ButtonState::Released {
+            continue;
+        }
+        if ki.key_code == KeyCode::Enter {
+            let Ok(v) = tps_input.0.parse() else {
+                continue;
+            };
+            tps.0 = v;
+        } else if ki.key_code == KeyCode::Backspace {
+            tps_input.0.pop();
+        }
+        let Some(text) = &ki.text else {
+            continue;
+        };
+        if !text.chars().all(|c| c.is_ascii_digit() || c == '.') {
+            continue;
+        }
+        tps_input.0.push_str(text);
+    }
 }
 
 fn tick(
