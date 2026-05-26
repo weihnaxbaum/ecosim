@@ -162,6 +162,7 @@ impl CellEntity {
 struct Net {
     layers: Vec<Layer>,
     temperature: f32,
+    mutation_rate: f32,
 }
 
 impl Net {
@@ -186,6 +187,7 @@ impl Net {
                 })
                 .collect(),
             temperature: 1.0,
+            mutation_rate: rng.f32() * 0.05 + 0.025,
         }
     }
 
@@ -203,11 +205,22 @@ impl Net {
             } else {
                 other.temperature
             },
+            mutation_rate: if rng.bool() {
+                self.mutation_rate
+            } else {
+                other.mutation_rate
+            },
         }
     }
 
-    fn mutate(&mut self, amount: f32, rng: &mut Rng) {
-        self.layers.iter_mut().for_each(|l| l.mutate(amount, rng));
+    fn mutate(&mut self, rng: &mut Rng) {
+        self.layers
+            .iter_mut()
+            .for_each(|l| l.mutate(self.mutation_rate, rng));
+        self.mutation_rate *= rng.f32() * 0.2 + 0.9;
+        if self.mutation_rate < 0.001 {
+            self.mutation_rate = 0.001;
+        }
     }
 
     fn avg(nets: &[&Net]) -> Net {
@@ -220,6 +233,7 @@ impl Net {
                 .map(|i| Layer::avg(&nets.iter().map(|n| &n.layers[i]).collect::<Vec<_>>()))
                 .collect(),
             temperature: nets.iter().map(|n| n.temperature).sum::<f32>() / nets.len() as f32,
+            mutation_rate: nets.iter().map(|n| n.mutation_rate).sum::<f32>() / nets.len() as f32,
         }
     }
 
@@ -258,6 +272,7 @@ impl Net {
             .flatten()
             .collect();
         vec.push(self.temperature);
+        vec.push(self.mutation_rate);
         vec
     }
 }
@@ -484,6 +499,19 @@ impl DiversityLabel {
     }
 }
 
+#[derive(Component)]
+struct MutationRateLabel;
+
+impl MutationRateLabel {
+    fn text(nets: &[&Net]) -> String {
+        format!("Avg mutation rate: {:.3}", Self::calc(nets))
+    }
+
+    fn calc(nets: &[&Net]) -> f32 {
+        nets.iter().map(|n| n.mutation_rate).sum::<f32>() / nets.len() as f32
+    }
+}
+
 #[derive(Resource, Debug)]
 struct Square(Handle<Mesh>);
 
@@ -578,16 +606,26 @@ fn setup(
         Transform::from_xyz(250.0, WIN_HEIGHT / 2.0 - 30.0, 2.0),
     ));
 
+    let nets: Vec<_> = ce.iter().map(|ce| &ce.net).collect();
+
     commands.spawn((
         DiversityLabel,
-        Text2d(DiversityLabel::text(
-            &ce.iter().map(|ce| &ce.net).collect::<Vec<_>>(),
-        )),
+        Text2d(DiversityLabel::text(&nets)),
         TextFont {
             font_size: 40.0,
             ..default()
         },
         Transform::from_xyz(300.0, WIN_HEIGHT / 2.0 - 80.0, 2.0),
+    ));
+
+    commands.spawn((
+        MutationRateLabel,
+        Text2d(MutationRateLabel::text(&nets)),
+        TextFont {
+            font_size: 40.0,
+            ..default()
+        },
+        Transform::from_xyz(400.0, WIN_HEIGHT / 2.0 - 130.0, 2.0),
     ));
 
     ce.into_iter()
@@ -651,6 +689,14 @@ fn finish_generation(
     mut commands: Commands,
     mut rng: ResMut<Rng>,
     mut diversity_label: Single<&mut Text2d, (With<DiversityLabel>, Without<GenerationLabel>)>,
+    mut mutation_rate_label: Single<
+        &mut Text2d,
+        (
+            With<MutationRateLabel>,
+            Without<GenerationLabel>,
+            Without<DiversityLabel>,
+        ),
+    >,
     mut tick: ResMut<Tick>,
 ) {
     generation.0 += 1;
@@ -685,11 +731,13 @@ fn finish_generation(
         let net1 = rng.u64() as usize % survivers.len();
         let net2 = rng.u64() as usize % survivers.len();
         let mut net = survivers[net1].mix(survivers[net2], &mut rng);
-        net.mutate(0.05, &mut rng);
+        net.mutate(&mut rng);
         ce.push(CellEntity { x, y, net });
     }
 
-    diversity_label.0 = DiversityLabel::text(&ce.iter().map(|ce| &ce.net).collect::<Vec<_>>());
+    let nets: Vec<_> = ce.iter().map(|ce| &ce.net).collect();
+    diversity_label.0 = DiversityLabel::text(&nets);
+    mutation_rate_label.0 = MutationRateLabel::text(&nets);
 
     commands.insert_resource(Grid([Cell::Empty; _]));
 
