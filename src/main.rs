@@ -474,6 +474,9 @@ struct FinishGeneration;
 struct GenerationLabel;
 
 #[derive(Component)]
+struct SurvivorsLabel;
+
+#[derive(Component)]
 struct DiversityLabel;
 
 impl DiversityLabel {
@@ -607,6 +610,16 @@ fn setup(
         Transform::from_xyz(250.0, WIN_HEIGHT / 2.0 - 30.0, 2.0),
     ));
 
+    commands.spawn((
+        SurvivorsLabel,
+        Text2d(format!("Survivors: N/A / {ENTITY_COUNT}")),
+        TextFont {
+            font_size: 40.0,
+            ..default()
+        },
+        Transform::from_xyz(340.0, WIN_HEIGHT / 2.0 - 80.0, 2.0),
+    ));
+
     let nets: Vec<_> = ce.iter().map(|ce| &ce.net).collect();
 
     commands.spawn((
@@ -616,7 +629,7 @@ fn setup(
             font_size: 40.0,
             ..default()
         },
-        Transform::from_xyz(300.0, WIN_HEIGHT / 2.0 - 80.0, 2.0),
+        Transform::from_xyz(300.0, WIN_HEIGHT / 2.0 - 130.0, 2.0),
     ));
 
     commands.spawn((
@@ -626,7 +639,7 @@ fn setup(
             font_size: 40.0,
             ..default()
         },
-        Transform::from_xyz(400.0, WIN_HEIGHT / 2.0 - 130.0, 2.0),
+        Transform::from_xyz(400.0, WIN_HEIGHT / 2.0 - 180.0, 2.0),
     ));
 
     ce.into_iter()
@@ -686,16 +699,25 @@ fn finish_generation(
     _: On<FinishGeneration>,
     mut generation: ResMut<Generation>,
     mut gen_label: Single<&mut Text2d, With<GenerationLabel>>,
+    mut survivors_label: Single<&mut Text2d, (With<SurvivorsLabel>, Without<GenerationLabel>)>,
     ce_q: Query<(Entity, &CellEntity)>,
     mut commands: Commands,
     mut rng: ResMut<Rng>,
-    mut diversity_label: Single<&mut Text2d, (With<DiversityLabel>, Without<GenerationLabel>)>,
+    mut diversity_label: Single<
+        &mut Text2d,
+        (
+            With<DiversityLabel>,
+            Without<GenerationLabel>,
+            Without<SurvivorsLabel>,
+        ),
+    >,
     mut mutation_rate_label: Single<
         &mut Text2d,
         (
             With<MutationRateLabel>,
             Without<GenerationLabel>,
             Without<DiversityLabel>,
+            Without<SurvivorsLabel>,
         ),
     >,
     mut tick: ResMut<Tick>,
@@ -710,6 +732,9 @@ fn finish_generation(
             survivors.push(&ce.net);
         }
     }
+
+    survivors_label.0 = format!("Survivors: {} / {ENTITY_COUNT}", survivors.len());
+
     dbg!(survivors.len());
     dbg!(
         survivors[0]
@@ -721,6 +746,7 @@ fn finish_generation(
             .map(|n| n.value)
             .collect::<Vec<_>>()
     );
+
     let mut pos = HashSet::with_capacity(ENTITY_COUNT);
     let mut ce = Vec::with_capacity(ENTITY_COUNT);
     while pos.len() < ENTITY_COUNT {
