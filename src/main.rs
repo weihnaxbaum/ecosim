@@ -583,7 +583,8 @@ fn setup(
 
     let mut pos = HashSet::with_capacity(ENTITY_COUNT);
     let mut ce = Vec::with_capacity(ENTITY_COUNT);
-    for _ in 0..ENTITY_COUNT {
+    assert!(ENTITY_COUNT <= GRID_SIZE as usize * GRID_SIZE as usize);
+    while pos.len() < ENTITY_COUNT {
         let x = rng.u64() as u16 % GRID_SIZE;
         let y = rng.u64() as u16 % GRID_SIZE;
         if pos.insert((x, y)) {
@@ -722,7 +723,7 @@ fn finish_generation(
     );
     let mut pos = HashSet::with_capacity(ENTITY_COUNT);
     let mut ce = Vec::with_capacity(ENTITY_COUNT);
-    for _ in 0..ENTITY_COUNT {
+    while pos.len() < ENTITY_COUNT {
         let x = rng.u64() as u16 % GRID_SIZE;
         let y = rng.u64() as u16 % GRID_SIZE;
         if !pos.insert((x, y)) {
