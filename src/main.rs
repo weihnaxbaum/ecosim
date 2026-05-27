@@ -740,8 +740,9 @@ fn tick(
         ce.net.eval();
         let rand = rng.f32();
         let mut i = -1;
+        let neurons = ce.net.layers.last().unwrap().neurons.len() as i32;
         let mut sum = 0.0;
-        while sum < rand {
+        while sum < rand && i + 1 < neurons {
             i += 1;
             sum += ce.net.layers.last().unwrap().neurons[i as usize].value;
         }
