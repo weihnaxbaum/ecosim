@@ -10,8 +10,18 @@ use bevy::{
 fn main() -> AppExit {
     App::new()
         .add_plugins(DefaultPlugins)
+        .init_state::<AppState>()
         .add_systems(Startup, setup)
-        .add_systems(Update, (run_sim, get_inputs))
+        .add_systems(OnEnter(AppState::Settings), setup_settings)
+        .add_systems(OnEnter(AppState::Sim), setup_sim)
+        .add_systems(
+            Update,
+            (
+                run_sim.run_if(in_state(AppState::Sim)),
+                get_btn_input,
+                get_text_input,
+            ),
+        )
         .add_observer(finish_generation)
         .run()
 }
@@ -21,9 +31,14 @@ const WIN_HEIGHT: f32 = 1080.0;
 const GRID_SIZE: u16 = 50;
 const CELL_PX: f32 = 20.0;
 const LINE_WIDTH: f32 = 3.0;
-const ENTITY_COUNT: usize = 100;
-const TICKS: u32 = 100;
 const MIN_FPS: f32 = 60.0;
+
+#[derive(States, Debug, Clone, PartialEq, Eq, Hash, Default)]
+enum AppState {
+    #[default]
+    Settings,
+    Sim,
+}
 
 #[derive(Resource, Clone, Debug)]
 struct Grid([Cell; GRID_SIZE as usize * GRID_SIZE as usize]);
@@ -455,13 +470,6 @@ impl Rng {
 #[derive(Resource)]
 struct Tick(u32);
 
-/// Ticks per second
-#[derive(Resource)]
-struct DesiredTps(f32);
-
-#[derive(Component)]
-struct TpsInput;
-
 #[derive(Resource)]
 struct Generation(u32);
 
@@ -519,6 +527,62 @@ struct Square(Handle<Mesh>);
 #[derive(Resource, Debug)]
 struct CellEntityMaterial(Handle<ColorMaterial>);
 
+#[derive(Component)]
+struct TextInput {
+    on_submit: fn(&str, Commands) -> bool,
+}
+
+#[derive(Resource)]
+struct EntityCount(usize);
+
+fn submit_entity_count(text: &str, mut commands: Commands) -> bool {
+    let Ok(v) = text.parse() else {
+        return false;
+    };
+    commands.insert_resource(EntityCount(v));
+    true
+}
+
+#[derive(Resource)]
+struct TicksPerGen(u32);
+
+fn submit_ticks_per_gen(text: &str, mut commands: Commands) -> bool {
+    let Ok(v) = text.parse() else {
+        return false;
+    };
+    commands.insert_resource(TicksPerGen(v));
+    true
+}
+
+/// Ticks per second
+#[derive(Resource)]
+struct DesiredTps(f32);
+
+fn submit_tps(text: &str, mut commands: Commands) -> bool {
+    let Ok(v) = text.parse() else {
+        return false;
+    };
+    commands.insert_resource(DesiredTps(v));
+    true
+}
+
+#[derive(Component)]
+struct ActionButton {
+    on_press: fn(Commands),
+}
+
+fn start_sim(mut commands: Commands) {
+    commands.set_state(AppState::Sim);
+}
+
+#[derive(Component)]
+struct Focus;
+
+#[derive(Component)]
+struct Focusable {
+    order: u8,
+}
+
 fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -535,11 +599,100 @@ fn setup(
         }),
     ));
 
-    let square = meshes.add(Rectangle::default());
-    commands.insert_resource(Square(square.clone()));
+    commands.insert_resource(Square(meshes.add(Rectangle::default())));
+    commands.insert_resource(CellEntityMaterial(
+        materials.add(Color::srgb(0.8, 0.2, 0.2)),
+    ));
+}
 
+fn setup_settings(mut commands: Commands) {
+    let default_entity_count = 100;
+    let default_ticks_per_gen = 100;
+    commands.insert_resource(EntityCount(default_entity_count));
+    commands.insert_resource(TicksPerGen(default_ticks_per_gen));
+
+    commands.spawn((
+        Text2d::new("Settings"),
+        TextFont {
+            font_size: 50.0,
+            ..default()
+        },
+        Transform::from_xyz(0.0, WIN_HEIGHT / 2.0 - 30.0, 2.0),
+        DespawnOnExit(AppState::Settings),
+    ));
+
+    commands.spawn((
+        Text2d::new("Entity count: "),
+        TextFont {
+            font_size: 40.0,
+            ..default()
+        },
+        Transform::from_xyz(-300.0, WIN_HEIGHT / 2.0 - 100.0, 2.0),
+        DespawnOnExit(AppState::Settings),
+    ));
+
+    commands.spawn((
+        Focus,
+        Focusable { order: 0 },
+        TextInput {
+            on_submit: submit_entity_count,
+        },
+        Text2d(format!("{default_entity_count}")),
+        TextFont {
+            font_size: 40.0,
+            ..default()
+        },
+        Transform::from_xyz(200.0, WIN_HEIGHT / 2.0 - 100.0, 2.0),
+        DespawnOnExit(AppState::Settings),
+    ));
+
+    commands.spawn((
+        Text2d::new("Ticks per generation: "),
+        TextFont {
+            font_size: 40.0,
+            ..default()
+        },
+        Transform::from_xyz(-400.0, WIN_HEIGHT / 2.0 - 150.0, 2.0),
+        DespawnOnExit(AppState::Settings),
+    ));
+
+    commands.spawn((
+        Focusable { order: 1 },
+        TextInput {
+            on_submit: submit_ticks_per_gen,
+        },
+        Text2d(format!("{default_ticks_per_gen}")),
+        TextFont {
+            font_size: 40.0,
+            ..default()
+        },
+        Transform::from_xyz(200.0, WIN_HEIGHT / 2.0 - 150.0, 2.0),
+        DespawnOnExit(AppState::Settings),
+    ));
+
+    commands.spawn((
+        Focusable { order: 2 },
+        ActionButton {
+            on_press: start_sim,
+        },
+        Text2d::new("Start"),
+        TextFont {
+            font_size: 40.0,
+            ..default()
+        },
+        Transform::from_xyz(0.0, WIN_HEIGHT / 2.0 - 220.0, 2.0),
+        DespawnOnExit(AppState::Settings),
+    ));
+}
+
+fn setup_sim(
+    mut commands: Commands,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    square: Res<Square>,
+    entity_count: Res<EntityCount>,
+) {
     let black = materials.add(Color::BLACK);
-    let square_clone = square.clone();
+    let square_clone = square.0.clone();
     let black_clone = black.clone();
     commands.spawn_batch((0..GRID_SIZE + 1).map(move |i| {
         let square = square_clone.clone();
@@ -558,9 +711,11 @@ fn setup(
             },
         )
     }));
+    let square_clone = square.0.clone();
     commands.spawn_batch((0..GRID_SIZE + 1).map(move |i| {
+        let square = square_clone.clone();
         (
-            Mesh2d(square.clone()),
+            Mesh2d(square),
             MeshMaterial2d(black.clone()),
             Transform {
                 translation: Vec3::new(
@@ -574,18 +729,14 @@ fn setup(
         )
     }));
 
-    commands.insert_resource(CellEntityMaterial(
-        materials.add(Color::srgb(0.8, 0.2, 0.2)),
-    ));
-
     commands.insert_resource(Grid([Cell::Empty; _]));
 
     let mut rng = Rng(1);
 
-    let mut pos = HashSet::with_capacity(ENTITY_COUNT);
-    let mut ce = Vec::with_capacity(ENTITY_COUNT);
-    assert!(ENTITY_COUNT <= GRID_SIZE as usize * GRID_SIZE as usize);
-    while pos.len() < ENTITY_COUNT {
+    let mut pos = HashSet::with_capacity(entity_count.0);
+    let mut ce = Vec::with_capacity(entity_count.0);
+    assert!(entity_count.0 <= GRID_SIZE as usize * GRID_SIZE as usize);
+    while pos.len() < entity_count.0 {
         let x = rng.u64() as u16 % GRID_SIZE;
         let y = rng.u64() as u16 % GRID_SIZE;
         if pos.insert((x, y)) {
@@ -611,7 +762,7 @@ fn setup(
 
     commands.spawn((
         SurvivorsLabel,
-        Text2d(format!("Survivors: N/A / {ENTITY_COUNT}")),
+        Text2d(format!("Survivors: N/A / {}", entity_count.0)),
         TextFont {
             font_size: 40.0,
             ..default()
@@ -651,7 +802,11 @@ fn setup(
     ));
 
     commands.spawn((
-        TpsInput,
+        Focus,
+        Focusable { order: 0 },
+        TextInput {
+            on_submit: submit_tps,
+        },
         Text2d::default(),
         TextFont {
             font_size: 40.0,
@@ -683,30 +838,92 @@ fn run_sim(world: &mut World, mut time_acc: Local<f32>) -> Result {
     Ok(())
 }
 
-fn get_inputs(
+fn get_btn_input(
     mut kb: MessageReader<KeyboardInput>,
-    mut tps_input: Single<&mut Text2d, With<TpsInput>>,
-    mut tps: ResMut<DesiredTps>,
+    btn: Single<(Entity, &ActionButton, &Focusable), With<Focus>>,
+    focusable: Query<(Entity, &Focusable), Without<Focus>>,
+    mut commands: Commands,
 ) {
+    let (btn_e, btn, current_focus) = btn.into_inner();
     for ki in kb.read() {
         if ki.state == ButtonState::Released {
             continue;
         }
         if ki.key_code == KeyCode::Enter {
-            let Ok(v) = tps_input.0.parse() else {
-                continue;
-            };
-            tps.0 = v;
+            (btn.on_press)(commands.reborrow());
+            return;
+        } else if ki.key_code == KeyCode::ArrowUp {
+            let next = current_focus.order.saturating_sub(1);
+            for (e, focusable) in &focusable {
+                if focusable.order == next {
+                    commands.entity(btn_e).remove::<Focus>();
+                    commands.entity(e).insert(Focus);
+                    return;
+                }
+            }
+            return;
+        } else if ki.key_code == KeyCode::ArrowDown {
+            let next = current_focus.order.saturating_add(1);
+            for (e, focusable) in &focusable {
+                if focusable.order == next {
+                    commands.entity(btn_e).remove::<Focus>();
+                    commands.entity(e).insert(Focus);
+                    return;
+                }
+            }
+            return;
+        }
+    }
+}
+
+fn get_text_input(
+    mut kb: MessageReader<KeyboardInput>,
+    text_input: Single<(Entity, &mut Text2d, &TextInput, &Focusable), With<Focus>>,
+    focusable: Query<(Entity, &Focusable), Without<Focus>>,
+    mut commands: Commands,
+) {
+    let (in_e, mut text2d, text_input, current_focus) = text_input.into_inner();
+    for ki in kb.read() {
+        if ki.state == ButtonState::Released {
+            continue;
+        }
+
+        if ki.key_code == KeyCode::Enter {
+            if !(text_input.on_submit)(&text2d.0, commands.reborrow()) {
+                text2d.clear();
+            }
+            return;
         } else if ki.key_code == KeyCode::Backspace {
-            tps_input.0.pop();
+            text2d.pop();
+        } else if ki.key_code == KeyCode::ArrowUp {
+            if !(text_input.on_submit)(&text2d.0, commands.reborrow()) {
+                text2d.clear();
+            }
+            let next = current_focus.order.saturating_sub(1);
+            for (e, focusable) in &focusable {
+                if focusable.order == next {
+                    commands.entity(in_e).remove::<Focus>();
+                    commands.entity(e).insert(Focus);
+                    return;
+                }
+            }
+            return;
+        } else if ki.key_code == KeyCode::ArrowDown {
+            if !(text_input.on_submit)(&text2d.0, commands.reborrow()) {
+                text2d.clear();
+            }
+            let next = current_focus.order.saturating_add(1);
+            for (e, focusable) in &focusable {
+                if focusable.order == next {
+                    commands.entity(in_e).remove::<Focus>();
+                    commands.entity(e).insert(Focus);
+                    return;
+                }
+            }
+            return;
+        } else if let Some(text) = &ki.text {
+            text2d.push_str(text);
         }
-        let Some(text) = &ki.text else {
-            continue;
-        };
-        if !text.chars().all(|c| c.is_ascii_digit() || c == '.') {
-            continue;
-        }
-        tps_input.0.push_str(text);
     }
 }
 
@@ -715,16 +932,17 @@ fn tick(
     mut grid: ResMut<Grid>,
     mut rng: ResMut<Rng>,
     mut tick: ResMut<Tick>,
+    ticks_per_gen: Res<TicksPerGen>,
     mut commands: Commands,
 ) {
-    if tick.0 >= TICKS {
+    if tick.0 >= ticks_per_gen.0 {
         commands.trigger(FinishGeneration);
         return;
     }
     for mut ce in &mut ce_q {
         let x = ce.x as f32 / GRID_SIZE as f32;
         let y = ce.y as f32 / GRID_SIZE as f32;
-        let mut inputs = vec![x, y, tick.0 as f32 / TICKS as f32, rng.f32()];
+        let mut inputs = vec![x, y, tick.0 as f32 / ticks_per_gen.0 as f32, rng.f32()];
         for dir in DIRS {
             inputs.push(
                 if let Some((x, y)) = dir.apply(ce.x, ce.y)
@@ -786,6 +1004,7 @@ fn finish_generation(
         ),
     >,
     mut tick: ResMut<Tick>,
+    entity_count: Res<EntityCount>,
 ) {
     generation.0 += 1;
     gen_label.0 = format!("Generation {}", generation.0);
@@ -798,7 +1017,7 @@ fn finish_generation(
         }
     }
 
-    survivors_label.0 = format!("Survivors: {} / {ENTITY_COUNT}", survivors.len());
+    survivors_label.0 = format!("Survivors: {} / {}", survivors.len(), entity_count.0);
 
     dbg!(survivors.len());
     dbg!(
@@ -812,9 +1031,9 @@ fn finish_generation(
             .collect::<Vec<_>>()
     );
 
-    let mut pos = HashSet::with_capacity(ENTITY_COUNT);
-    let mut ce = Vec::with_capacity(ENTITY_COUNT);
-    while pos.len() < ENTITY_COUNT {
+    let mut pos = HashSet::with_capacity(entity_count.0);
+    let mut ce = Vec::with_capacity(entity_count.0);
+    while pos.len() < entity_count.0 {
         let x = rng.u64() as u16 % GRID_SIZE;
         let y = rng.u64() as u16 % GRID_SIZE;
         if !pos.insert((x, y)) {
