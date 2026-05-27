@@ -28,8 +28,6 @@ fn main() -> AppExit {
 
 const WIN_WIDTH: f32 = 1920.0;
 const WIN_HEIGHT: f32 = 1080.0;
-const GRID_SIZE: u16 = 50;
-const CELL_PX: f32 = 20.0;
 const LINE_WIDTH: f32 = 3.0;
 const MIN_FPS: f32 = 60.0;
 
@@ -41,34 +39,37 @@ enum AppState {
 }
 
 #[derive(Resource, Clone, Debug)]
-struct Grid([Cell; GRID_SIZE as usize * GRID_SIZE as usize]);
+struct Grid {
+    size: u16,
+    data: Box<[Cell]>,
+}
 
 impl Grid {
     fn get(&self, x: u16, y: u16) -> Option<Cell> {
-        self.0
-            .get(x as usize + y as usize * GRID_SIZE as usize)
+        self.data
+            .get(x as usize + y as usize * self.size as usize)
             .cloned()
     }
 
-    fn idx_from_pos(x: u16, y: u16) -> usize {
-        x as usize + y as usize * GRID_SIZE as usize
+    fn idx_from_pos(&self, x: u16, y: u16) -> usize {
+        x as usize + y as usize * self.size as usize
     }
 
-    fn world_pos_from_grid_pos(x: u16, y: u16) -> Vec2 {
+    fn world_pos_from_grid_pos(x: u16, y: u16, cell_px: f32) -> Vec2 {
         Vec2::new(
-            (x as f32 + 0.5) * CELL_PX - WIN_WIDTH / 2.0,
-            WIN_HEIGHT / 2.0 - (y as f32 + 0.5) * CELL_PX,
+            (x as f32 + 0.5) * cell_px - WIN_WIDTH / 2.0,
+            WIN_HEIGHT / 2.0 - (y as f32 + 0.5) * cell_px,
         )
     }
 
     fn move_cell(&mut self, x: u16, y: u16, dir: Dir) -> bool {
-        let Some((tx, ty)) = dir.apply(x, y) else {
+        let Some((tx, ty)) = dir.apply(x, y, self.size) else {
             return false;
         };
-        let source = Self::idx_from_pos(x, y);
-        let target = Self::idx_from_pos(tx, ty);
-        self.0[target] = self.0[source];
-        self.0[source] = Cell::Empty;
+        let source = self.idx_from_pos(x, y);
+        let target = self.idx_from_pos(tx, ty);
+        self.data[target] = self.data[source];
+        self.data[source] = Cell::Empty;
         true
     }
 }
@@ -84,7 +85,7 @@ enum Dir {
 }
 
 impl Dir {
-    fn apply(self, x: u16, y: u16) -> Option<(u16, u16)> {
+    fn apply(self, x: u16, y: u16, grid_size: u16) -> Option<(u16, u16)> {
         match self {
             Self::Up => {
                 if y > 0 {
@@ -94,7 +95,7 @@ impl Dir {
                 }
             }
             Self::Down => {
-                if y < GRID_SIZE - 1 {
+                if y < grid_size - 1 {
                     Some((x, y + 1))
                 } else {
                     None
@@ -108,7 +109,7 @@ impl Dir {
                 }
             }
             Self::Right => {
-                if x < GRID_SIZE - 1 {
+                if x < grid_size - 1 {
                     Some((x + 1, y))
                 } else {
                     None
@@ -138,6 +139,7 @@ impl CellEntity {
         square: Res<Square>,
         material: Res<CellEntityMaterial>,
         mut grid: ResMut<Grid>,
+        grid_size: Res<GridSize>,
     ) {
         let (x, y) = (ce.x, ce.y);
         let id = commands
@@ -146,18 +148,19 @@ impl CellEntity {
                 Mesh2d(square.0.clone()),
                 MeshMaterial2d(material.0.clone()),
                 Transform {
-                    translation: Grid::world_pos_from_grid_pos(x, y).extend(0.0),
-                    scale: Vec3::new(CELL_PX, CELL_PX, 1.0),
+                    translation: Grid::world_pos_from_grid_pos(x, y, grid_size.cell_px())
+                        .extend(0.0),
+                    scale: Vec3::new(grid_size.cell_px(), grid_size.cell_px(), 1.0),
                     ..default()
                 },
             ))
             .id();
-        grid.0[x as usize + y as usize * GRID_SIZE as usize] = Cell::Entity(id);
+        grid.data[x as usize + y as usize * grid_size.0 as usize] = Cell::Entity(id);
     }
 
-    fn update_tf(mut q: Query<(&mut Transform, &Self), Changed<Self>>) {
+    fn update_tf(mut q: Query<(&mut Transform, &Self), Changed<Self>>, grid_size: Res<GridSize>) {
         for (mut tf, ce) in &mut q {
-            let pos = Grid::world_pos_from_grid_pos(ce.x, ce.y);
+            let pos = Grid::world_pos_from_grid_pos(ce.x, ce.y, grid_size.cell_px());
             tf.translation.x = pos.x;
             tf.translation.y = pos.y;
         }
@@ -532,6 +535,23 @@ struct TextInput {
     on_submit: fn(&str, Commands) -> bool,
 }
 
+#[derive(Resource, Clone, Copy)]
+struct GridSize(u16);
+
+impl GridSize {
+    fn cell_px(&self) -> f32 {
+        1000.0 / self.0 as f32
+    }
+}
+
+fn submit_grid_size(text: &str, mut commands: Commands) -> bool {
+    let Ok(v) = text.parse() else {
+        return false;
+    };
+    commands.insert_resource(GridSize(v));
+    true
+}
+
 #[derive(Resource)]
 struct EntityCount(usize);
 
@@ -606,8 +626,10 @@ fn setup(
 }
 
 fn setup_settings(mut commands: Commands) {
+    let default_grid_size = 50;
     let default_entity_count = 100;
     let default_ticks_per_gen = 100;
+    commands.insert_resource(GridSize(default_grid_size));
     commands.insert_resource(EntityCount(default_entity_count));
     commands.insert_resource(TicksPerGen(default_ticks_per_gen));
 
@@ -622,7 +644,7 @@ fn setup_settings(mut commands: Commands) {
     ));
 
     commands.spawn((
-        Text2d::new("Entity count: "),
+        Text2d::new("Grid size: "),
         TextFont {
             font_size: 40.0,
             ..default()
@@ -635,9 +657,9 @@ fn setup_settings(mut commands: Commands) {
         Focus,
         Focusable { order: 0 },
         TextInput {
-            on_submit: submit_entity_count,
+            on_submit: submit_grid_size,
         },
-        Text2d(format!("{default_entity_count}")),
+        Text2d(format!("{default_grid_size}")),
         TextFont {
             font_size: 40.0,
             ..default()
@@ -647,21 +669,21 @@ fn setup_settings(mut commands: Commands) {
     ));
 
     commands.spawn((
-        Text2d::new("Ticks per generation: "),
+        Text2d::new("Entity count: "),
         TextFont {
             font_size: 40.0,
             ..default()
         },
-        Transform::from_xyz(-400.0, WIN_HEIGHT / 2.0 - 150.0, 2.0),
+        Transform::from_xyz(-300.0, WIN_HEIGHT / 2.0 - 150.0, 2.0),
         DespawnOnExit(AppState::Settings),
     ));
 
     commands.spawn((
         Focusable { order: 1 },
         TextInput {
-            on_submit: submit_ticks_per_gen,
+            on_submit: submit_entity_count,
         },
-        Text2d(format!("{default_ticks_per_gen}")),
+        Text2d(format!("{default_entity_count}")),
         TextFont {
             font_size: 40.0,
             ..default()
@@ -671,7 +693,31 @@ fn setup_settings(mut commands: Commands) {
     ));
 
     commands.spawn((
+        Text2d::new("Ticks per generation: "),
+        TextFont {
+            font_size: 40.0,
+            ..default()
+        },
+        Transform::from_xyz(-400.0, WIN_HEIGHT / 2.0 - 200.0, 2.0),
+        DespawnOnExit(AppState::Settings),
+    ));
+
+    commands.spawn((
         Focusable { order: 2 },
+        TextInput {
+            on_submit: submit_ticks_per_gen,
+        },
+        Text2d(format!("{default_ticks_per_gen}")),
+        TextFont {
+            font_size: 40.0,
+            ..default()
+        },
+        Transform::from_xyz(200.0, WIN_HEIGHT / 2.0 - 200.0, 2.0),
+        DespawnOnExit(AppState::Settings),
+    ));
+
+    commands.spawn((
+        Focusable { order: 3 },
         ActionButton {
             on_press: start_sim,
         },
@@ -680,7 +726,7 @@ fn setup_settings(mut commands: Commands) {
             font_size: 40.0,
             ..default()
         },
-        Transform::from_xyz(0.0, WIN_HEIGHT / 2.0 - 220.0, 2.0),
+        Transform::from_xyz(0.0, WIN_HEIGHT / 2.0 - 270.0, 2.0),
         DespawnOnExit(AppState::Settings),
     ));
 }
@@ -690,11 +736,14 @@ fn setup_sim(
     mut materials: ResMut<Assets<ColorMaterial>>,
     square: Res<Square>,
     entity_count: Res<EntityCount>,
+    grid_size: Res<GridSize>,
 ) {
+    let grid_size = *grid_size;
+
     let black = materials.add(Color::BLACK);
     let square_clone = square.0.clone();
     let black_clone = black.clone();
-    commands.spawn_batch((0..GRID_SIZE + 1).map(move |i| {
+    commands.spawn_batch((0..grid_size.0 + 1).map(move |i| {
         let square = square_clone.clone();
         let black = black_clone.clone();
         (
@@ -702,43 +751,50 @@ fn setup_sim(
             MeshMaterial2d(black),
             Transform {
                 translation: Vec3::new(
-                    i as f32 * CELL_PX - WIN_WIDTH / 2.0,
-                    (WIN_HEIGHT - GRID_SIZE as f32 * CELL_PX) / 2.0,
+                    i as f32 * grid_size.cell_px() - WIN_WIDTH / 2.0,
+                    (WIN_HEIGHT - grid_size.0 as f32 * grid_size.cell_px()) / 2.0,
                     1.0,
                 ),
-                scale: Vec3::new(LINE_WIDTH, GRID_SIZE as f32 * CELL_PX, 1.0),
+                scale: Vec3::new(LINE_WIDTH, grid_size.0 as f32 * grid_size.cell_px(), 1.0),
                 ..default()
             },
         )
     }));
     let square_clone = square.0.clone();
-    commands.spawn_batch((0..GRID_SIZE + 1).map(move |i| {
+    commands.spawn_batch((0..grid_size.0 + 1).map(move |i| {
         let square = square_clone.clone();
         (
             Mesh2d(square),
             MeshMaterial2d(black.clone()),
             Transform {
                 translation: Vec3::new(
-                    (WIN_WIDTH - GRID_SIZE as f32 * CELL_PX) / -2.0,
-                    WIN_HEIGHT / 2.0 - i as f32 * CELL_PX,
+                    (WIN_WIDTH - grid_size.0 as f32 * grid_size.cell_px()) / -2.0,
+                    WIN_HEIGHT / 2.0 - i as f32 * grid_size.cell_px(),
                     1.0,
                 ),
-                scale: Vec3::new(GRID_SIZE as f32 * CELL_PX, LINE_WIDTH, 1.0),
+                scale: Vec3::new(grid_size.0 as f32 * grid_size.cell_px(), LINE_WIDTH, 1.0),
                 ..default()
             },
         )
     }));
 
-    commands.insert_resource(Grid([Cell::Empty; _]));
+    let mut data = Box::new_uninit_slice(grid_size.0 as usize * grid_size.0 as usize);
+    for cell in &mut data {
+        cell.write(Cell::Empty);
+    }
+    commands.insert_resource(Grid {
+        size: grid_size.0,
+        data: unsafe { data.assume_init() },
+    });
 
     let mut rng = Rng(1);
 
     let mut pos = HashSet::with_capacity(entity_count.0);
     let mut ce = Vec::with_capacity(entity_count.0);
-    assert!(entity_count.0 <= GRID_SIZE as usize * GRID_SIZE as usize);
+    assert!(entity_count.0 <= grid_size.0 as usize * grid_size.0 as usize);
     while pos.len() < entity_count.0 {
-        let x = rng.u64() as u16 % GRID_SIZE;
-        let y = rng.u64() as u16 % GRID_SIZE;
+        let x = rng.u64() as u16 % grid_size.0;
+        let y = rng.u64() as u16 % grid_size.0;
         if pos.insert((x, y)) {
             let net = Net::random(&[8, 6, 5], &mut rng);
             ce.push(CellEntity { x, y, net });
@@ -940,12 +996,12 @@ fn tick(
         return;
     }
     for mut ce in &mut ce_q {
-        let x = ce.x as f32 / GRID_SIZE as f32;
-        let y = ce.y as f32 / GRID_SIZE as f32;
+        let x = ce.x as f32 / grid.size as f32;
+        let y = ce.y as f32 / grid.size as f32;
         let mut inputs = vec![x, y, tick.0 as f32 / ticks_per_gen.0 as f32, rng.f32()];
         for dir in DIRS {
             inputs.push(
-                if let Some((x, y)) = dir.apply(ce.x, ce.y)
+                if let Some((x, y)) = dir.apply(ce.x, ce.y, grid.size)
                     && grid.get(x, y) == Some(Cell::Empty)
                 {
                     1.0
@@ -967,7 +1023,7 @@ fn tick(
         let Some(dir) = DIRS.get(i as usize) else {
             continue;
         };
-        if let Some((x, y)) = dir.apply(ce.x, ce.y)
+        if let Some((x, y)) = dir.apply(ce.x, ce.y, grid.size)
             && grid.get(x, y) == Some(Cell::Empty)
         {
             grid.move_cell(ce.x, ce.y, *dir);
@@ -1005,6 +1061,7 @@ fn finish_generation(
     >,
     mut tick: ResMut<Tick>,
     entity_count: Res<EntityCount>,
+    grid_size: Res<GridSize>,
 ) {
     generation.0 += 1;
     gen_label.0 = format!("Generation {}", generation.0);
@@ -1012,7 +1069,7 @@ fn finish_generation(
     let mut survivors = vec![];
     for (e, ce) in &ce_q {
         commands.entity(e).despawn();
-        if ce.x > GRID_SIZE / 2 {
+        if ce.x > grid_size.0 / 2 {
             survivors.push(&ce.net);
         }
     }
@@ -1034,8 +1091,8 @@ fn finish_generation(
     let mut pos = HashSet::with_capacity(entity_count.0);
     let mut ce = Vec::with_capacity(entity_count.0);
     while pos.len() < entity_count.0 {
-        let x = rng.u64() as u16 % GRID_SIZE;
-        let y = rng.u64() as u16 % GRID_SIZE;
+        let x = rng.u64() as u16 % grid_size.0;
+        let y = rng.u64() as u16 % grid_size.0;
         if !pos.insert((x, y)) {
             continue;
         }
@@ -1050,7 +1107,14 @@ fn finish_generation(
     diversity_label.0 = DiversityLabel::text(&nets);
     mutation_rate_label.0 = MutationRateLabel::text(&nets);
 
-    commands.insert_resource(Grid([Cell::Empty; _]));
+    let mut data = Box::new_uninit_slice(grid_size.0 as usize * grid_size.0 as usize);
+    for cell in &mut data {
+        cell.write(Cell::Empty);
+    }
+    commands.insert_resource(Grid {
+        size: grid_size.0,
+        data: unsafe { data.assume_init() },
+    });
 
     ce.into_iter()
         .for_each(|ce| commands.run_system_cached_with(CellEntity::spawn, ce));
