@@ -36,6 +36,7 @@ enum AppState {
     #[default]
     Settings,
     Sim,
+    Done,
 }
 
 #[derive(Resource, Clone, Debug)]
@@ -1079,6 +1080,10 @@ fn finish_generation(
     }
 
     survivors_label.0 = format!("Survivors: {} / {}", survivors.len(), entity_count.0);
+    if survivors.is_empty() {
+        commands.set_state(AppState::Done);
+        return;
+    }
 
     dbg!(survivors.len());
     dbg!(
