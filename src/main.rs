@@ -45,6 +45,17 @@ struct Grid {
 }
 
 impl Grid {
+    fn new(size: u16) -> Self {
+        let mut data = Box::new_uninit_slice(size as usize * size as usize);
+        for cell in &mut data {
+            cell.write(Cell::Empty);
+        }
+        Self {
+            size,
+            data: unsafe { data.assume_init() },
+        }
+    }
+
     fn get(&self, x: u16, y: u16) -> Option<Cell> {
         self.data
             .get(x as usize + y as usize * self.size as usize)
@@ -778,14 +789,7 @@ fn setup_sim(
         )
     }));
 
-    let mut data = Box::new_uninit_slice(grid_size.0 as usize * grid_size.0 as usize);
-    for cell in &mut data {
-        cell.write(Cell::Empty);
-    }
-    commands.insert_resource(Grid {
-        size: grid_size.0,
-        data: unsafe { data.assume_init() },
-    });
+    commands.insert_resource(Grid::new(grid_size.0));
 
     let mut rng = Rng(1);
 
@@ -1107,14 +1111,7 @@ fn finish_generation(
     diversity_label.0 = DiversityLabel::text(&nets);
     mutation_rate_label.0 = MutationRateLabel::text(&nets);
 
-    let mut data = Box::new_uninit_slice(grid_size.0 as usize * grid_size.0 as usize);
-    for cell in &mut data {
-        cell.write(Cell::Empty);
-    }
-    commands.insert_resource(Grid {
-        size: grid_size.0,
-        data: unsafe { data.assume_init() },
-    });
+    commands.insert_resource(Grid::new(grid_size.0));
 
     ce.into_iter()
         .for_each(|ce| commands.run_system_cached_with(CellEntity::spawn, ce));
