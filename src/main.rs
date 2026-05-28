@@ -11,15 +11,17 @@ fn main() -> AppExit {
     App::new()
         .add_plugins(DefaultPlugins)
         .init_state::<AppState>()
+        .add_sub_state::<SimState>()
         .add_systems(Startup, setup)
         .add_systems(OnEnter(AppState::Settings), setup_settings)
         .add_systems(OnEnter(AppState::Sim), setup_sim)
         .add_systems(
             Update,
             (
-                run_sim.run_if(in_state(AppState::Sim)),
+                run_sim.run_if(in_state(SimState::Running)),
                 get_btn_input,
                 get_text_input,
+                get_other_input,
             ),
         )
         .add_observer(finish_generation)
@@ -36,7 +38,14 @@ enum AppState {
     #[default]
     Settings,
     Sim,
-    Done,
+}
+
+#[derive(SubStates, Debug, Clone, PartialEq, Eq, Hash, Default)]
+#[source(AppState = AppState::Sim)]
+enum SimState {
+    #[default]
+    Running,
+    Stopped,
 }
 
 #[derive(Resource, Clone, Debug)]
@@ -165,6 +174,7 @@ impl CellEntity {
                     scale: Vec3::new(grid_size.cell_px(), grid_size.cell_px(), 1.0),
                     ..default()
                 },
+                DespawnOnExit(AppState::Sim),
             ))
             .id();
         grid.data[x as usize + y as usize * grid_size.0 as usize] = Cell::Entity(id);
@@ -770,6 +780,7 @@ fn setup_sim(
                 scale: Vec3::new(LINE_WIDTH, grid_size.0 as f32 * grid_size.cell_px(), 1.0),
                 ..default()
             },
+            DespawnOnExit(AppState::Sim),
         )
     }));
     let square_clone = square.0.clone();
@@ -787,6 +798,7 @@ fn setup_sim(
                 scale: Vec3::new(grid_size.0 as f32 * grid_size.cell_px(), LINE_WIDTH, 1.0),
                 ..default()
             },
+            DespawnOnExit(AppState::Sim),
         )
     }));
 
@@ -819,6 +831,7 @@ fn setup_sim(
             ..default()
         },
         Transform::from_xyz(250.0, WIN_HEIGHT / 2.0 - 30.0, 2.0),
+        DespawnOnExit(AppState::Sim),
     ));
 
     commands.spawn((
@@ -829,6 +842,7 @@ fn setup_sim(
             ..default()
         },
         Transform::from_xyz(340.0, WIN_HEIGHT / 2.0 - 80.0, 2.0),
+        DespawnOnExit(AppState::Sim),
     ));
 
     let nets: Vec<_> = ce.iter().map(|ce| &ce.net).collect();
@@ -841,6 +855,7 @@ fn setup_sim(
             ..default()
         },
         Transform::from_xyz(300.0, WIN_HEIGHT / 2.0 - 130.0, 2.0),
+        DespawnOnExit(AppState::Sim),
     ));
 
     commands.spawn((
@@ -851,6 +866,7 @@ fn setup_sim(
             ..default()
         },
         Transform::from_xyz(400.0, WIN_HEIGHT / 2.0 - 180.0, 2.0),
+        DespawnOnExit(AppState::Sim),
     ));
 
     commands.spawn((
@@ -860,6 +876,7 @@ fn setup_sim(
             ..default()
         },
         Transform::from_xyz(250.0, WIN_HEIGHT / 2.0 - 230.0, 2.0),
+        DespawnOnExit(AppState::Sim),
     ));
 
     commands.spawn((
@@ -874,6 +891,7 @@ fn setup_sim(
             ..default()
         },
         Transform::from_xyz(500.0, WIN_HEIGHT / 2.0 - 230.0, 2.0),
+        DespawnOnExit(AppState::Sim),
     ));
 
     ce.into_iter()
@@ -988,6 +1006,16 @@ fn get_text_input(
     }
 }
 
+fn get_other_input(
+    kb: Res<ButtonInput<KeyCode>>,
+    state: Res<State<AppState>>,
+    mut next_state: ResMut<NextState<AppState>>,
+) {
+    if *state.get() != AppState::Settings && kb.pressed(KeyCode::Escape) {
+        next_state.set(AppState::Settings);
+    }
+}
+
 fn tick(
     mut ce_q: Query<&mut CellEntity>,
     mut grid: ResMut<Grid>,
@@ -1081,7 +1109,7 @@ fn finish_generation(
 
     survivors_label.0 = format!("Survivors: {} / {}", survivors.len(), entity_count.0);
     if survivors.is_empty() {
-        commands.set_state(AppState::Done);
+        commands.set_state(SimState::Stopped);
         return;
     }
 
