@@ -1,7 +1,6 @@
-use std::time::Instant;
+use std::{mem, time::Instant};
 
 use bevy::{
-    camera::ScalingMode,
     input::{ButtonState, keyboard::KeyboardInput},
     platform::collections::HashSet,
     prelude::*,
@@ -11,17 +10,22 @@ fn main() -> AppExit {
     App::new()
         .add_plugins(DefaultPlugins)
         .init_state::<AppState>()
+        .add_sub_state::<SettingsState>()
         .add_sub_state::<SimState>()
+        .add_computed_state::<GridState>()
         .add_systems(Startup, setup)
-        .add_systems(OnEnter(AppState::Settings), setup_settings)
+        .add_systems(OnEnter(SettingsState::Parameters), setup_settings)
+        .add_systems(OnEnter(SettingsState::Grid), setup_grid_settings)
         .add_systems(OnEnter(AppState::Sim), setup_sim)
         .add_systems(
             Update,
             (
                 run_sim.run_if(in_state(SimState::Running)),
+                paint_survival_region.run_if(in_state(SettingsState::Grid)),
                 get_btn_input,
                 get_text_input,
-                get_other_input,
+                return_to_settings_on_esc,
+                update_window_scale_factor,
             ),
         )
         .add_observer(finish_generation)
@@ -41,11 +45,39 @@ enum AppState {
 }
 
 #[derive(SubStates, Debug, Clone, PartialEq, Eq, Hash, Default)]
+#[source(AppState = AppState::Settings)]
+enum SettingsState {
+    #[default]
+    Parameters,
+    Grid,
+}
+
+#[derive(SubStates, Debug, Clone, PartialEq, Eq, Hash, Default)]
 #[source(AppState = AppState::Sim)]
 enum SimState {
     #[default]
     Running,
     Stopped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct GridState;
+
+impl ComputedStates for GridState {
+    type SourceStates = (AppState, Option<SettingsState>);
+
+    fn compute((app_state, settings_state): Self::SourceStates) -> Option<Self> {
+        match app_state {
+            AppState::Settings => {
+                if settings_state.unwrap() == SettingsState::Grid {
+                    Some(Self)
+                } else {
+                    None
+                }
+            }
+            AppState::Sim => Some(Self),
+        }
+    }
 }
 
 #[derive(Resource, Clone, Debug)]
@@ -58,11 +90,21 @@ impl Grid {
     fn new(size: u16) -> Self {
         let mut data = Box::new_uninit_slice(size as usize * size as usize);
         for cell in &mut data {
-            cell.write(Cell::Empty);
+            cell.write(Cell {
+                cell_type: CellType::Empty,
+                safe: false,
+                safe_indicator: None,
+            });
         }
         Self {
             size,
             data: unsafe { data.assume_init() },
+        }
+    }
+
+    fn clear(&mut self) {
+        for cell in &mut self.data {
+            cell.cell_type = CellType::Empty;
         }
     }
 
@@ -83,15 +125,43 @@ impl Grid {
         )
     }
 
+    fn grid_pos_from_world_pos(pos: Vec2, cell_px: f32) -> (u16, u16) {
+        (
+            ((pos.x + WIN_WIDTH / 2.0) / cell_px - 0.5).round() as u16,
+            ((pos.y - WIN_HEIGHT / 2.0) / -cell_px - 0.5).round() as u16,
+        )
+    }
+
     fn move_cell(&mut self, x: u16, y: u16, dir: Dir) -> bool {
         let Some((tx, ty)) = dir.apply(x, y, self.size) else {
             return false;
         };
         let source = self.idx_from_pos(x, y);
         let target = self.idx_from_pos(tx, ty);
-        self.data[target] = self.data[source];
-        self.data[source] = Cell::Empty;
+        self.data[target].cell_type = self.data[source].cell_type;
+        self.data[source].cell_type = CellType::Empty;
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Grid;
+
+    #[test]
+    fn pos() {
+        assert_eq!(
+            (10, 5),
+            Grid::grid_pos_from_world_pos(Grid::world_pos_from_grid_pos(10, 5, 10.0), 10.0)
+        );
+        assert_eq!(
+            (6, 8),
+            Grid::grid_pos_from_world_pos(Grid::world_pos_from_grid_pos(6, 8, 5.3), 5.3)
+        );
+        assert_eq!(
+            (3, 2),
+            Grid::grid_pos_from_world_pos(Grid::world_pos_from_grid_pos(3, 2, 7.6), 7.6)
+        );
     }
 }
 
@@ -140,8 +210,15 @@ impl Dir {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct Cell {
+    cell_type: CellType,
+    safe: bool,
+    safe_indicator: Option<Entity>,
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Cell {
+enum CellType {
     Empty,
     Entity(Entity),
 }
@@ -177,7 +254,7 @@ impl CellEntity {
                 DespawnOnExit(AppState::Sim),
             ))
             .id();
-        grid.data[x as usize + y as usize * grid_size.0 as usize] = Cell::Entity(id);
+        grid.data[x as usize + y as usize * grid_size.0 as usize].cell_type = CellType::Entity(id);
     }
 
     fn update_tf(mut q: Query<(&mut Transform, &Self), Changed<Self>>, grid_size: Res<GridSize>) {
@@ -186,6 +263,10 @@ impl CellEntity {
             tf.translation.x = pos.x;
             tf.translation.y = pos.y;
         }
+    }
+
+    fn cell(&self, grid: &Grid) -> Cell {
+        grid.get(self.x, self.y).unwrap()
     }
 }
 
@@ -552,6 +633,50 @@ struct Square(Handle<Mesh>);
 #[derive(Resource, Debug)]
 struct CellEntityMaterial(Handle<ColorMaterial>);
 
+#[derive(Resource)]
+struct SafeIndicatorMaterial(Handle<ColorMaterial>);
+
+#[derive(Component)]
+struct SafeIndicator;
+
+impl SafeIndicator {
+    fn spawn(
+        input: In<(u16, u16)>,
+        mut commands: Commands,
+        square: Res<Square>,
+        material: Res<SafeIndicatorMaterial>,
+        mut grid: ResMut<Grid>,
+        grid_size: Res<GridSize>,
+    ) {
+        let (x, y) = *input;
+        let i = grid.idx_from_pos(x, y);
+        let e = commands
+            .spawn((
+                Self,
+                Mesh2d(square.0.clone()),
+                MeshMaterial2d(material.0.clone()),
+                Transform {
+                    translation: Grid::world_pos_from_grid_pos(x, y, grid_size.cell_px())
+                        .extend(-1.0),
+                    scale: Vec3::new(grid_size.cell_px(), grid_size.cell_px(), 1.0),
+                    ..default()
+                },
+                DespawnOnExit(GridState),
+            ))
+            .id();
+        grid.data[i].safe_indicator = Some(e);
+    }
+
+    fn despawn(input: In<(u16, u16)>, mut grid: ResMut<Grid>, mut commands: Commands) {
+        let (x, y) = *input;
+        let i = grid.idx_from_pos(x, y);
+        let Some(e) = grid.data[i].safe_indicator.take() else {
+            return;
+        };
+        commands.entity(e).despawn();
+    }
+}
+
 #[derive(Component)]
 struct TextInput {
     on_submit: fn(&str, Commands) -> bool,
@@ -613,6 +738,10 @@ struct ActionButton {
     on_press: fn(Commands),
 }
 
+fn continue_to_grid_settings(mut commands: Commands) {
+    commands.set_state(SettingsState::Grid);
+}
+
 fn start_sim(mut commands: Commands) {
     commands.set_state(AppState::Sim);
 }
@@ -630,20 +759,14 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
-    commands.spawn((
-        Camera2d,
-        Projection::Orthographic(OrthographicProjection {
-            scaling_mode: ScalingMode::AutoMin {
-                min_width: WIN_WIDTH,
-                min_height: WIN_HEIGHT,
-            },
-            ..OrthographicProjection::default_2d()
-        }),
-    ));
+    commands.spawn(Camera2d);
 
     commands.insert_resource(Square(meshes.add(Rectangle::default())));
     commands.insert_resource(CellEntityMaterial(
         materials.add(Color::srgb(0.8, 0.2, 0.2)),
+    ));
+    commands.insert_resource(SafeIndicatorMaterial(
+        materials.add(Color::srgb(0.0, 0.2, 0.0)),
     ));
 }
 
@@ -662,7 +785,7 @@ fn setup_settings(mut commands: Commands) {
             ..default()
         },
         Transform::from_xyz(0.0, WIN_HEIGHT / 2.0 - 30.0, 2.0),
-        DespawnOnExit(AppState::Settings),
+        DespawnOnExit(SettingsState::Parameters),
     ));
 
     commands.spawn((
@@ -672,7 +795,7 @@ fn setup_settings(mut commands: Commands) {
             ..default()
         },
         Transform::from_xyz(-300.0, WIN_HEIGHT / 2.0 - 100.0, 2.0),
-        DespawnOnExit(AppState::Settings),
+        DespawnOnExit(SettingsState::Parameters),
     ));
 
     commands.spawn((
@@ -687,7 +810,7 @@ fn setup_settings(mut commands: Commands) {
             ..default()
         },
         Transform::from_xyz(200.0, WIN_HEIGHT / 2.0 - 100.0, 2.0),
-        DespawnOnExit(AppState::Settings),
+        DespawnOnExit(SettingsState::Parameters),
     ));
 
     commands.spawn((
@@ -697,7 +820,7 @@ fn setup_settings(mut commands: Commands) {
             ..default()
         },
         Transform::from_xyz(-300.0, WIN_HEIGHT / 2.0 - 150.0, 2.0),
-        DespawnOnExit(AppState::Settings),
+        DespawnOnExit(SettingsState::Parameters),
     ));
 
     commands.spawn((
@@ -711,7 +834,7 @@ fn setup_settings(mut commands: Commands) {
             ..default()
         },
         Transform::from_xyz(200.0, WIN_HEIGHT / 2.0 - 150.0, 2.0),
-        DespawnOnExit(AppState::Settings),
+        DespawnOnExit(SettingsState::Parameters),
     ));
 
     commands.spawn((
@@ -721,7 +844,7 @@ fn setup_settings(mut commands: Commands) {
             ..default()
         },
         Transform::from_xyz(-400.0, WIN_HEIGHT / 2.0 - 200.0, 2.0),
-        DespawnOnExit(AppState::Settings),
+        DespawnOnExit(SettingsState::Parameters),
     ));
 
     commands.spawn((
@@ -735,29 +858,28 @@ fn setup_settings(mut commands: Commands) {
             ..default()
         },
         Transform::from_xyz(200.0, WIN_HEIGHT / 2.0 - 200.0, 2.0),
-        DespawnOnExit(AppState::Settings),
+        DespawnOnExit(SettingsState::Parameters),
     ));
 
     commands.spawn((
         Focusable { order: 3 },
         ActionButton {
-            on_press: start_sim,
+            on_press: continue_to_grid_settings,
         },
-        Text2d::new("Start"),
+        Text2d::new("Continue"),
         TextFont {
             font_size: 40.0,
             ..default()
         },
         Transform::from_xyz(0.0, WIN_HEIGHT / 2.0 - 270.0, 2.0),
-        DespawnOnExit(AppState::Settings),
+        DespawnOnExit(SettingsState::Parameters),
     ));
 }
 
-fn setup_sim(
+fn setup_grid_settings(
     mut commands: Commands,
     mut materials: ResMut<Assets<ColorMaterial>>,
     square: Res<Square>,
-    entity_count: Res<EntityCount>,
     grid_size: Res<GridSize>,
 ) {
     let grid_size = *grid_size;
@@ -780,7 +902,7 @@ fn setup_sim(
                 scale: Vec3::new(LINE_WIDTH, grid_size.0 as f32 * grid_size.cell_px(), 1.0),
                 ..default()
             },
-            DespawnOnExit(AppState::Sim),
+            DespawnOnExit(GridState),
         )
     }));
     let square_clone = square.0.clone();
@@ -798,12 +920,49 @@ fn setup_sim(
                 scale: Vec3::new(grid_size.0 as f32 * grid_size.cell_px(), LINE_WIDTH, 1.0),
                 ..default()
             },
-            DespawnOnExit(AppState::Sim),
+            DespawnOnExit(GridState),
         )
     }));
 
     commands.insert_resource(Grid::new(grid_size.0));
 
+    commands.spawn((
+        Text2d::new("Settings"),
+        TextFont {
+            font_size: 50.0,
+            ..default()
+        },
+        Transform::from_xyz(350.0, WIN_HEIGHT / 2.0 - 30.0, 2.0),
+        DespawnOnExit(SettingsState::Grid),
+    ));
+
+    commands.spawn((
+        Text2d::new("Paint survival region"),
+        TextFont {
+            font_size: 40.0,
+            ..default()
+        },
+        Transform::from_xyz(350.0, WIN_HEIGHT / 2.0 - 90.0, 2.0),
+        DespawnOnExit(SettingsState::Grid),
+    ));
+
+    commands.spawn((
+        Focus,
+        Focusable { order: 0 },
+        ActionButton {
+            on_press: start_sim,
+        },
+        Text2d::new("Start"),
+        TextFont {
+            font_size: 40.0,
+            ..default()
+        },
+        Transform::from_xyz(350.0, WIN_HEIGHT / 2.0 - 300.0, 2.0),
+        DespawnOnExit(SettingsState::Grid),
+    ));
+}
+
+fn setup_sim(mut commands: Commands, entity_count: Res<EntityCount>, grid_size: Res<GridSize>) {
     let mut rng = Rng(1);
 
     let mut pos = HashSet::with_capacity(entity_count.0);
@@ -896,6 +1055,12 @@ fn setup_sim(
 
     ce.into_iter()
         .for_each(|ce| commands.run_system_cached_with(CellEntity::spawn, ce));
+}
+
+fn update_window_scale_factor(mut window: Single<&mut Window>) {
+    let scale_factor = (window.physical_width() as f32 / WIN_WIDTH)
+        .min(window.physical_height() as f32 / WIN_HEIGHT);
+    window.resolution.set_scale_factor(scale_factor);
 }
 
 fn run_sim(world: &mut World, mut time_acc: Local<f32>) -> Result {
@@ -1006,13 +1171,59 @@ fn get_text_input(
     }
 }
 
-fn get_other_input(
+fn return_to_settings_on_esc(
     kb: Res<ButtonInput<KeyCode>>,
-    state: Res<State<AppState>>,
-    mut next_state: ResMut<NextState<AppState>>,
+    app_state: Res<State<AppState>>,
+    settings_state: Option<Res<State<SettingsState>>>,
+    mut commands: Commands,
 ) {
-    if *state.get() != AppState::Settings && kb.pressed(KeyCode::Escape) {
-        next_state.set(AppState::Settings);
+    if (*app_state.get() != AppState::Settings
+        || *settings_state.unwrap().get() == SettingsState::Grid)
+        && kb.pressed(KeyCode::Escape)
+    {
+        commands.set_state(AppState::Settings);
+        commands.set_state(SettingsState::Parameters);
+    }
+}
+
+fn paint_survival_region(
+    mouse: Res<ButtonInput<MouseButton>>,
+    window: Single<&Window>,
+    mut grid: ResMut<Grid>,
+    grid_size: Res<GridSize>,
+    mut drag_start: Local<(u16, u16)>,
+    mut commands: Commands,
+) {
+    let Some(cursor) = window
+        .cursor_position()
+        .map(|pos| Vec2::new(pos.x - window.width() / 2.0, -pos.y + window.height() / 2.0))
+    else {
+        return;
+    };
+    if mouse.just_pressed(MouseButton::Left) {
+        *drag_start = Grid::grid_pos_from_world_pos(cursor, grid_size.cell_px());
+    } else if mouse.just_released(MouseButton::Left) {
+        let mut drag_end = Grid::grid_pos_from_world_pos(cursor, grid_size.cell_px());
+        if drag_start.0 > drag_end.0 {
+            mem::swap(&mut drag_start.0, &mut drag_end.0);
+        }
+        if drag_start.1 > drag_end.1 {
+            mem::swap(&mut drag_start.1, &mut drag_end.1);
+        }
+        for x in drag_start.0..=drag_end.0 {
+            for y in drag_start.1..=drag_end.1 {
+                if x >= grid_size.0 || y >= grid_size.0 {
+                    return;
+                }
+                let i = grid.idx_from_pos(x, y);
+                grid.data[i].safe = !grid.data[i].safe;
+                if grid.data[i].safe {
+                    commands.run_system_cached_with(SafeIndicator::spawn, (x, y));
+                } else {
+                    commands.run_system_cached_with(SafeIndicator::despawn, (x, y));
+                }
+            }
+        }
     }
 }
 
@@ -1035,7 +1246,8 @@ fn tick(
         for dir in DIRS {
             inputs.push(
                 if let Some((x, y)) = dir.apply(ce.x, ce.y, grid.size)
-                    && grid.get(x, y) == Some(Cell::Empty)
+                    && let Some(cell) = grid.get(x, y)
+                    && cell.cell_type == CellType::Empty
                 {
                     1.0
                 } else {
@@ -1057,7 +1269,8 @@ fn tick(
             continue;
         };
         if let Some((x, y)) = dir.apply(ce.x, ce.y, grid.size)
-            && grid.get(x, y) == Some(Cell::Empty)
+            && let Some(cell) = grid.get(x, y)
+            && cell.cell_type == CellType::Empty
         {
             grid.move_cell(ce.x, ce.y, *dir);
             ce.x = x;
@@ -1074,6 +1287,7 @@ fn finish_generation(
     mut survivors_label: Single<&mut Text2d, (With<SurvivorsLabel>, Without<GenerationLabel>)>,
     ce_q: Query<(Entity, &CellEntity)>,
     mut commands: Commands,
+    mut grid: ResMut<Grid>,
     mut rng: ResMut<Rng>,
     mut diversity_label: Single<
         &mut Text2d,
@@ -1102,7 +1316,7 @@ fn finish_generation(
     let mut survivors = vec![];
     for (e, ce) in &ce_q {
         commands.entity(e).despawn();
-        if ce.x > grid_size.0 / 2 {
+        if ce.cell(&grid).safe {
             survivors.push(&ce.net);
         }
     }
@@ -1144,7 +1358,7 @@ fn finish_generation(
     diversity_label.0 = DiversityLabel::text(&nets);
     mutation_rate_label.0 = MutationRateLabel::text(&nets);
 
-    commands.insert_resource(Grid::new(grid_size.0));
+    grid.clear();
 
     ce.into_iter()
         .for_each(|ce| commands.run_system_cached_with(CellEntity::spawn, ce));
