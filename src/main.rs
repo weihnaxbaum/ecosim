@@ -721,6 +721,35 @@ fn submit_ticks_per_gen(text: &str, mut commands: Commands) -> bool {
     true
 }
 
+#[derive(Resource, Clone)]
+struct HiddenLayers(Vec<usize>);
+
+impl HiddenLayers {
+    fn text(&self) -> String {
+        let mut s = String::new();
+        if self.0.is_empty() {
+            return s;
+        }
+        s += &format!("{}", self.0[0]);
+        for v in self.0.iter().skip(1) {
+            s += &format!(", {v}");
+        }
+        s
+    }
+}
+
+fn submit_hidden_layers(text: &str, mut commands: Commands) -> bool {
+    let mut vec = vec![];
+    for s in text.split(',') {
+        match s.trim().parse() {
+            Ok(v) => vec.push(v),
+            _ => return false,
+        }
+    }
+    commands.insert_resource(HiddenLayers(vec));
+    true
+}
+
 /// Ticks per second
 #[derive(Resource)]
 struct DesiredTps(f32);
@@ -774,9 +803,11 @@ fn setup_settings(mut commands: Commands) {
     let default_grid_size = 50;
     let default_entity_count = 100;
     let default_ticks_per_gen = 100;
+    let default_hidden_layers = HiddenLayers(vec![6]);
     commands.insert_resource(GridSize(default_grid_size));
     commands.insert_resource(EntityCount(default_entity_count));
     commands.insert_resource(TicksPerGen(default_ticks_per_gen));
+    commands.insert_resource(default_hidden_layers.clone());
 
     commands.spawn((
         Text2d::new("Settings"),
@@ -862,7 +893,31 @@ fn setup_settings(mut commands: Commands) {
     ));
 
     commands.spawn((
+        Text2d::new("Hidden layers (CSV): "),
+        TextFont {
+            font_size: 40.0,
+            ..default()
+        },
+        Transform::from_xyz(-400.0, WIN_HEIGHT / 2.0 - 250.0, 2.0),
+        DespawnOnExit(SettingsState::Parameters),
+    ));
+
+    commands.spawn((
         Focusable { order: 3 },
+        TextInput {
+            on_submit: submit_hidden_layers,
+        },
+        Text2d(default_hidden_layers.text()),
+        TextFont {
+            font_size: 40.0,
+            ..default()
+        },
+        Transform::from_xyz(200.0, WIN_HEIGHT / 2.0 - 250.0, 2.0),
+        DespawnOnExit(SettingsState::Parameters),
+    ));
+
+    commands.spawn((
+        Focusable { order: 4 },
         ActionButton {
             on_press: continue_to_grid_settings,
         },
@@ -871,7 +926,7 @@ fn setup_settings(mut commands: Commands) {
             font_size: 40.0,
             ..default()
         },
-        Transform::from_xyz(0.0, WIN_HEIGHT / 2.0 - 270.0, 2.0),
+        Transform::from_xyz(0.0, WIN_HEIGHT / 2.0 - 320.0, 2.0),
         DespawnOnExit(SettingsState::Parameters),
     ));
 }
@@ -962,8 +1017,19 @@ fn setup_grid_settings(
     ));
 }
 
-fn setup_sim(mut commands: Commands, entity_count: Res<EntityCount>, grid_size: Res<GridSize>) {
+fn setup_sim(
+    mut commands: Commands,
+    entity_count: Res<EntityCount>,
+    grid_size: Res<GridSize>,
+    mut hidden_layers: ResMut<HiddenLayers>,
+) {
     let mut rng = Rng(1);
+
+    let mut layers = Vec::with_capacity(hidden_layers.0.len() + 2);
+    layers.push(8);
+    layers.append(&mut hidden_layers.0);
+    layers.push(5);
+    commands.remove_resource::<HiddenLayers>();
 
     let mut pos = HashSet::with_capacity(entity_count.0);
     let mut ce = Vec::with_capacity(entity_count.0);
@@ -972,7 +1038,7 @@ fn setup_sim(mut commands: Commands, entity_count: Res<EntityCount>, grid_size: 
         let x = rng.u64() as u16 % grid_size.0;
         let y = rng.u64() as u16 % grid_size.0;
         if pos.insert((x, y)) {
-            let net = Net::random(&[8, 6, 5], &mut rng);
+            let net = Net::random(&layers, &mut rng);
             ce.push(CellEntity { x, y, net });
         }
     }
