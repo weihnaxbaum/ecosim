@@ -4,7 +4,7 @@ use bevy::{platform::collections::HashSet, prelude::*};
 
 use crate::{
     AppState, MIN_FPS, Rng, WIN_HEIGHT,
-    grid::{CellEntity, CellType, DIRS, Grid},
+    grid::{Cell, CellEntity, DIRS, Grid},
     net::Net,
     settings::{EntityCount, GridSize, HiddenLayers, TicksPerGen},
     ui::{Focus, Focusable, TextInput},
@@ -95,6 +95,7 @@ fn setup_sim(
     mut commands: Commands,
     entity_count: Res<EntityCount>,
     grid_size: Res<GridSize>,
+    grid: Res<Grid>,
     mut hidden_layers: ResMut<HiddenLayers>,
 ) {
     let mut rng = Rng(1);
@@ -111,7 +112,8 @@ fn setup_sim(
     while pos.len() < entity_count.get() {
         let x = rng.u64() as u16 % grid_size.get();
         let y = rng.u64() as u16 % grid_size.get();
-        if pos.insert((x, y)) {
+        let i = grid.idx_from_pos(x, y);
+        if !matches!(grid[i], Cell::Wall { .. }) && pos.insert((x, y)) {
             let net = Net::random(&layers, &mut rng);
             ce.push(CellEntity { x, y, net });
         }
@@ -236,7 +238,7 @@ fn tick(
             inputs.push(
                 if let Some((x, y)) = dir.apply(ce.x, ce.y, grid.size())
                     && let Some(cell) = grid.get(x, y)
-                    && cell.cell_type() == CellType::Empty
+                    && cell.is_free()
                 {
                     1.0
                 } else {
@@ -259,9 +261,9 @@ fn tick(
         };
         if let Some((x, y)) = dir.apply(ce.x, ce.y, grid.size())
             && let Some(cell) = grid.get(x, y)
-            && cell.cell_type() == CellType::Empty
+            && cell.is_free()
         {
-            grid.move_cell(ce.x, ce.y, *dir);
+            grid.move_cell_entity(ce.x, ce.y, *dir);
             ce.x = x;
             ce.y = y;
         }
@@ -305,7 +307,7 @@ fn finish_generation(
     let mut survivors = vec![];
     for (e, ce) in &ce_q {
         commands.entity(e).despawn();
-        if ce.cell(&grid).safe {
+        if matches!(ce.cell(&grid), Cell::Safe { .. }) {
             survivors.push(&ce.net);
         }
     }
@@ -324,7 +326,8 @@ fn finish_generation(
     while pos.len() < entity_count.get() {
         let x = rng.u64() as u16 % grid_size.get();
         let y = rng.u64() as u16 % grid_size.get();
-        if !pos.insert((x, y)) {
+        let i = grid.idx_from_pos(x, y);
+        if matches!(grid[i], Cell::Wall { .. }) || !pos.insert((x, y)) {
             continue;
         }
         let net1 = rng.u64() as usize % survivors.len();
@@ -338,7 +341,7 @@ fn finish_generation(
     diversity_label.0 = DiversityLabel::text(&nets);
     mutation_rate_label.0 = MutationRateLabel::text(&nets);
 
-    grid.clear();
+    grid.clear_entities();
 
     ce.into_iter()
         .for_each(|ce| commands.run_system_cached_with(CellEntity::spawn, ce));

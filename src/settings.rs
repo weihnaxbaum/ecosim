@@ -4,7 +4,7 @@ use bevy::prelude::*;
 
 use crate::{
     AppState, WIN_HEIGHT,
-    grid::{Grid, SafeIndicator},
+    grid::{CellConfigIndicator, CellType, Grid},
     ui::{ActionButton, Focus, Focusable, TextInput},
 };
 
@@ -15,7 +15,7 @@ pub fn plugin(app: &mut App) {
         .add_systems(
             Update,
             (
-                paint_survival_region.run_if(in_state(SettingsState::Grid)),
+                (paint_region, cycle_paint_type).run_if(in_state(SettingsState::Grid)),
                 return_to_settings_on_esc,
             ),
         );
@@ -111,6 +111,23 @@ fn submit_hidden_layers(text: &str, mut commands: Commands) -> bool {
     }
     commands.insert_resource(HiddenLayers(vec));
     true
+}
+
+#[derive(Resource)]
+struct CurrentCellType(CellType);
+
+#[derive(Component)]
+struct PaintInstructionLabel;
+
+impl PaintInstructionLabel {
+    fn text(cell_type: CellType) -> String {
+        match cell_type {
+            CellType::Normal => "Paint normal cells (eraser)",
+            CellType::Safe => "Paint survival region",
+            CellType::Wall => "Paint walls",
+        }
+        .into()
+    }
 }
 
 fn continue_to_grid_settings(mut commands: Commands) {
@@ -254,6 +271,8 @@ fn setup_settings(mut commands: Commands) {
 }
 
 fn setup_grid_settings(mut commands: Commands) {
+    commands.insert_resource(CurrentCellType(CellType::Safe));
+
     commands.spawn((
         Text2d::new("Settings"),
         TextFont {
@@ -265,12 +284,23 @@ fn setup_grid_settings(mut commands: Commands) {
     ));
 
     commands.spawn((
-        Text2d::new("Paint survival region"),
+        PaintInstructionLabel,
+        Text2d(PaintInstructionLabel::text(CellType::Safe)),
         TextFont {
             font_size: 40.0,
             ..default()
         },
-        Transform::from_xyz(350.0, WIN_HEIGHT / 2.0 - 90.0, 2.0),
+        Transform::from_xyz(450.0, WIN_HEIGHT / 2.0 - 90.0, 2.0),
+        DespawnOnExit(SettingsState::Grid),
+    ));
+
+    commands.spawn((
+        Text2d::new("Press space to change what you're painting."),
+        TextFont {
+            font_size: 30.0,
+            ..default()
+        },
+        Transform::from_xyz(500.0, WIN_HEIGHT / 2.0 - 150.0, 2.0),
         DespawnOnExit(SettingsState::Grid),
     ));
 
@@ -290,7 +320,25 @@ fn setup_grid_settings(mut commands: Commands) {
     ));
 }
 
-fn paint_survival_region(
+fn cycle_paint_type(
+    mut current_cell_type: ResMut<CurrentCellType>,
+    kb: Res<ButtonInput<KeyCode>>,
+    mut text: Single<&mut Text2d, With<PaintInstructionLabel>>,
+) {
+    if !kb.just_pressed(KeyCode::Space) {
+        return;
+    };
+    let new_type = match current_cell_type.0 {
+        CellType::Normal => CellType::Safe,
+        CellType::Safe => CellType::Wall,
+        CellType::Wall => CellType::Normal,
+    };
+    current_cell_type.0 = new_type;
+    text.0 = PaintInstructionLabel::text(new_type);
+}
+
+fn paint_region(
+    cell_type: Res<CurrentCellType>,
     mouse: Res<ButtonInput<MouseButton>>,
     window: Single<&Window>,
     mut grid: ResMut<Grid>,
@@ -320,11 +368,22 @@ fn paint_survival_region(
                     return;
                 }
                 let i = grid.idx_from_pos(x, y);
-                grid[i].safe = !grid[i].safe;
-                if grid[i].safe {
-                    commands.run_system_cached_with(SafeIndicator::spawn, (x, y));
-                } else {
-                    commands.run_system_cached_with(SafeIndicator::despawn, (x, y));
+                if cell_type.0 == grid[i].cell_type() {
+                    continue;
+                }
+                match cell_type.0 {
+                    CellType::Normal => {
+                        CellConfigIndicator::despawn(x, y, &grid, commands.reborrow());
+                        grid[i].set_cell_type(CellType::Normal);
+                    }
+                    CellType::Safe | CellType::Wall => {
+                        CellConfigIndicator::despawn(x, y, &grid, commands.reborrow());
+                        grid[i].set_cell_type(cell_type.0);
+                        commands.run_system_cached_with(
+                            CellConfigIndicator::spawn,
+                            (x, y, cell_type.0),
+                        );
+                    }
                 }
             }
         }

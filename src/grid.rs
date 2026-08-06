@@ -50,6 +50,9 @@ fn spawn(
     commands.insert_resource(SafeIndicatorMaterial(
         materials.add(Color::srgb(0.0, 0.2, 0.0)),
     ));
+    commands.insert_resource(WallIndicatorMaterial(
+        materials.add(Color::srgb(0.5, 0.5, 0.5)),
+    ));
 
     let grid_size = *grid_size;
 
@@ -127,11 +130,7 @@ impl Grid {
     fn new(size: u16) -> Self {
         let mut data = Box::new_uninit_slice(size as usize * size as usize);
         for cell in &mut data {
-            cell.write(Cell {
-                cell_type: CellType::Empty,
-                safe: false,
-                safe_indicator: None,
-            });
+            cell.write(Cell::Normal { cell_entity: None });
         }
         Self {
             size,
@@ -139,9 +138,9 @@ impl Grid {
         }
     }
 
-    pub fn clear(&mut self) {
+    pub fn clear_entities(&mut self) {
         for cell in &mut self.data {
-            cell.cell_type = CellType::Empty;
+            cell.set_cell_entity(None);
         }
     }
 
@@ -173,14 +172,14 @@ impl Grid {
         )
     }
 
-    pub fn move_cell(&mut self, x: u16, y: u16, dir: Dir) -> bool {
+    pub fn move_cell_entity(&mut self, x: u16, y: u16, dir: Dir) -> bool {
         let Some((tx, ty)) = dir.apply(x, y, self.size) else {
             return false;
         };
         let source = self.idx_from_pos(x, y);
         let target = self.idx_from_pos(tx, ty);
-        self.data[target].cell_type = self.data[source].cell_type;
-        self.data[source].cell_type = CellType::Empty;
+        self.data[target].set_cell_entity(self.data[source].cell_entity());
+        self.data[source].set_cell_entity(None);
         true
     }
 }
@@ -230,23 +229,105 @@ impl Dir {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct Cell {
-    cell_type: CellType,
-    pub safe: bool,
-    safe_indicator: Option<Entity>,
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Cell {
+    Normal {
+        cell_entity: Option<Entity>,
+    },
+    Safe {
+        cell_entity: Option<Entity>,
+        indicator: Entity,
+    },
+    Wall {
+        indicator: Entity,
+    },
 }
 
 impl Cell {
     pub fn cell_type(&self) -> CellType {
-        self.cell_type
+        match *self {
+            Cell::Normal { .. } => CellType::Normal,
+            Cell::Safe { .. } => CellType::Safe,
+            Cell::Wall { .. } => CellType::Wall,
+        }
+    }
+
+    /// Changes the `Cell` variant, without spawning or despawning cell indicators.
+    /// `indicator` fields are filled with `Entity::PLACEHOLDER`.
+    pub fn set_cell_type(&mut self, cell_type: CellType) {
+        if self.cell_type() == cell_type {
+            return;
+        }
+        *self = match cell_type {
+            CellType::Normal => Cell::Normal {
+                cell_entity: match *self {
+                    Cell::Normal { .. } => unreachable!(),
+                    Cell::Safe { cell_entity, .. } => cell_entity,
+                    Cell::Wall { .. } => None,
+                },
+            },
+            CellType::Safe => Cell::Safe {
+                cell_entity: match *self {
+                    Cell::Normal { cell_entity } => cell_entity,
+                    Cell::Safe { .. } => unreachable!(),
+                    Cell::Wall { .. } => None,
+                },
+                indicator: Entity::PLACEHOLDER,
+            },
+            CellType::Wall => Cell::Wall {
+                indicator: Entity::PLACEHOLDER,
+            },
+        };
+    }
+
+    fn cell_entity(&self) -> Option<Entity> {
+        match *self {
+            Self::Normal { cell_entity } => cell_entity,
+            Self::Safe { cell_entity, .. } => cell_entity,
+            Self::Wall { .. } => None,
+        }
+    }
+
+    fn set_cell_entity(&mut self, cell_entity: Option<Entity>) {
+        *self = match *self {
+            Self::Normal { .. } => Self::Normal { cell_entity },
+            Self::Safe { indicator, .. } => Self::Safe {
+                cell_entity,
+                indicator,
+            },
+            Self::Wall { indicator } => Self::Wall { indicator },
+        };
+    }
+
+    fn indicator(&self) -> Option<Entity> {
+        match *self {
+            Cell::Normal { .. } => None,
+            Cell::Safe { indicator, .. } => Some(indicator),
+            Cell::Wall { indicator } => Some(indicator),
+        }
+    }
+
+    fn set_indicator(&mut self, indicator: Entity) {
+        *self = match *self {
+            Self::Normal { cell_entity } => Self::Normal { cell_entity },
+            Self::Safe { cell_entity, .. } => Self::Safe {
+                cell_entity,
+                indicator,
+            },
+            Self::Wall { .. } => Self::Wall { indicator },
+        };
+    }
+
+    pub fn is_free(&self) -> bool {
+        self.cell_entity().is_none() && !matches!(self, Self::Wall { .. })
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum CellType {
-    Empty,
-    Entity(Entity),
+    Normal,
+    Safe,
+    Wall,
 }
 
 #[derive(Component, Clone, Debug)]
@@ -280,8 +361,7 @@ impl CellEntity {
                 DespawnOnExit(AppState::Sim),
             ))
             .id();
-        grid.data[x as usize + y as usize * grid_size.get() as usize].cell_type =
-            CellType::Entity(id);
+        grid.data[x as usize + y as usize * grid_size.get() as usize].set_cell_entity(Some(id));
     }
 
     pub fn update_tf(
@@ -309,25 +389,35 @@ pub struct CellEntityMaterial(Handle<ColorMaterial>);
 #[derive(Resource)]
 pub struct SafeIndicatorMaterial(Handle<ColorMaterial>);
 
-#[derive(Component)]
-pub struct SafeIndicator;
+#[derive(Resource)]
+pub struct WallIndicatorMaterial(Handle<ColorMaterial>);
 
-impl SafeIndicator {
+#[derive(Component)]
+pub struct CellConfigIndicator;
+
+impl CellConfigIndicator {
+    /// Cell type has to be updated *before* calling this system.
     pub fn spawn(
-        input: In<(u16, u16)>,
+        input: In<(u16, u16, CellType)>,
         mut commands: Commands,
         square: Res<Square>,
-        material: Res<SafeIndicatorMaterial>,
+        safe_material: Res<SafeIndicatorMaterial>,
+        wall_material: Res<WallIndicatorMaterial>,
         mut grid: ResMut<Grid>,
         grid_size: Res<GridSize>,
     ) {
-        let (x, y) = *input;
+        let (x, y, cell_type) = *input;
         let i = grid.idx_from_pos(x, y);
+        let material = match cell_type {
+            CellType::Safe => safe_material.0.clone(),
+            CellType::Wall => wall_material.0.clone(),
+            _ => return,
+        };
         let e = commands
             .spawn((
                 Self,
                 Mesh2d(square.0.clone()),
-                MeshMaterial2d(material.0.clone()),
+                MeshMaterial2d(material),
                 Transform {
                     translation: Grid::world_pos_from_grid_pos(x, y, grid_size.cell_px())
                         .extend(-1.0),
@@ -337,16 +427,17 @@ impl SafeIndicator {
                 DespawnOnExit(GridState),
             ))
             .id();
-        grid.data[i].safe_indicator = Some(e);
+        grid.data[i].set_indicator(e);
     }
 
-    pub fn despawn(input: In<(u16, u16)>, mut grid: ResMut<Grid>, mut commands: Commands) {
-        let (x, y) = *input;
+    /// Cell type has to be updated *after* calling this system.
+    pub fn despawn(x: u16, y: u16, grid: &Grid, mut commands: Commands) {
         let i = grid.idx_from_pos(x, y);
-        let Some(e) = grid.data[i].safe_indicator.take() else {
+        let Some(e) = &mut grid.data[i].indicator() else {
             return;
         };
-        commands.entity(e).despawn();
+        commands.entity(*e).despawn();
+        *e = Entity::PLACEHOLDER;
     }
 }
 
