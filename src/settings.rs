@@ -114,6 +114,23 @@ fn submit_hidden_layers(text: &str, mut commands: Commands) -> bool {
 }
 
 #[derive(Resource)]
+pub struct PreferClosePartners(bool);
+
+impl PreferClosePartners {
+    pub fn get(&self) -> bool {
+        self.0
+    }
+}
+
+fn submit_prefer_close_partners(text: &str, mut commands: Commands) -> bool {
+    let Ok(v) = text.parse() else {
+        return false;
+    };
+    commands.insert_resource(PreferClosePartners(v));
+    true
+}
+
+#[derive(Resource)]
 struct CurrentCellType(CellType);
 
 #[derive(Component)]
@@ -143,10 +160,12 @@ fn setup_settings(mut commands: Commands) {
     let default_entity_count = 100;
     let default_ticks_per_gen = 100;
     let default_hidden_layers = HiddenLayers(vec![6]);
+    let default_prefer_close_partners = true;
     commands.insert_resource(GridSize(default_grid_size));
     commands.insert_resource(EntityCount(default_entity_count));
     commands.insert_resource(TicksPerGen(default_ticks_per_gen));
     commands.insert_resource(default_hidden_layers.clone());
+    commands.insert_resource(PreferClosePartners(default_prefer_close_partners));
 
     commands.spawn((
         Text2d::new("Settings"),
@@ -256,7 +275,31 @@ fn setup_settings(mut commands: Commands) {
     ));
 
     commands.spawn((
+        Text2d::new("Prefer close partners: "),
+        TextFont {
+            font_size: 40.0,
+            ..default()
+        },
+        Transform::from_xyz(-400.0, WIN_HEIGHT / 2.0 - 300.0, 2.0),
+        DespawnOnExit(SettingsState::Parameters),
+    ));
+
+    commands.spawn((
         Focusable { order: 4 },
+        TextInput {
+            on_submit: submit_prefer_close_partners,
+        },
+        Text2d(format!("{default_prefer_close_partners}")),
+        TextFont {
+            font_size: 40.0,
+            ..default()
+        },
+        Transform::from_xyz(200.0, WIN_HEIGHT / 2.0 - 300.0, 2.0),
+        DespawnOnExit(SettingsState::Parameters),
+    ));
+
+    commands.spawn((
+        Focusable { order: 5 },
         ActionButton {
             on_press: continue_to_grid_settings,
         },
@@ -265,7 +308,7 @@ fn setup_settings(mut commands: Commands) {
             font_size: 40.0,
             ..default()
         },
-        Transform::from_xyz(0.0, WIN_HEIGHT / 2.0 - 320.0, 2.0),
+        Transform::from_xyz(0.0, WIN_HEIGHT / 2.0 - 370.0, 2.0),
         DespawnOnExit(SettingsState::Parameters),
     ));
 }

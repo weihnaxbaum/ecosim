@@ -6,7 +6,7 @@ use crate::{
     AppState, MIN_FPS, Rng, WIN_HEIGHT,
     grid::{Cell, CellEntity, DIRS, Grid},
     net::Net,
-    settings::{EntityCount, GridSize, HiddenLayers, TicksPerGen},
+    settings::{EntityCount, GridSize, HiddenLayers, PreferClosePartners, TicksPerGen},
     ui::{Focus, Focusable, TextInput},
 };
 
@@ -277,6 +277,7 @@ fn finish_generation(
     mut gen_label: Single<&mut Text2d, With<GenerationLabel>>,
     mut survivors_label: Single<&mut Text2d, (With<SurvivorsLabel>, Without<GenerationLabel>)>,
     ce_q: Query<(Entity, &CellEntity)>,
+    prefer_close_partners: Res<PreferClosePartners>,
     mut commands: Commands,
     mut grid: ResMut<Grid>,
     mut rng: ResMut<Rng>,
@@ -308,7 +309,7 @@ fn finish_generation(
     for (e, ce) in &ce_q {
         commands.entity(e).despawn();
         if matches!(ce.cell(&grid), Cell::Safe { .. }) {
-            survivors.push(&ce.net);
+            survivors.push(ce);
         }
     }
 
@@ -319,7 +320,7 @@ fn finish_generation(
     }
 
     dbg!(survivors.len());
-    dbg!(survivors[0].output());
+    dbg!(survivors[0].net.output());
 
     let mut pos = HashSet::with_capacity(entity_count.get());
     let mut ce = Vec::with_capacity(entity_count.get());
@@ -330,9 +331,17 @@ fn finish_generation(
         if matches!(grid[i], Cell::Wall { .. }) || !pos.insert((x, y)) {
             continue;
         }
-        let net1 = rng.u64() as usize % survivors.len();
-        let net2 = rng.u64() as usize % survivors.len();
-        let mut net = survivors[net1].mix(survivors[net2], &mut rng);
+        let net1 = survivors[rng.u64() as usize % survivors.len()];
+
+        let net2 = if prefer_close_partners.get()
+            && let Some(e) = get_close_ce(net1.x, net1.y, &grid, &mut rng)
+        {
+            &ce_q.get(e).unwrap().1.net
+        } else {
+            &survivors[rng.u64() as usize % survivors.len()].net
+        };
+
+        let mut net = net1.net.mix(net2, &mut rng);
         net.mutate(&mut rng);
         ce.push(CellEntity { x, y, net });
     }
@@ -347,4 +356,38 @@ fn finish_generation(
         .for_each(|ce| commands.run_system_cached_with(CellEntity::spawn, ce));
 
     tick.0 = 0;
+}
+
+fn get_close_ce(x: u16, y: u16, grid: &Grid, rng: &mut Rng) -> Option<Entity> {
+    let max_dist = 6;
+    let mut cell_entities = vec![];
+    for dist in 1..max_dist {
+        for side in 0..4 {
+            for offset in -dist..dist {
+                let (mut x_off, mut y_off) = if side % 2 == 0 {
+                    (offset, -dist)
+                } else {
+                    (dist, offset)
+                };
+                if side / 2 == 1 {
+                    x_off = -x_off;
+                    y_off = -y_off;
+                }
+                if let Some(x) = x.checked_add_signed(x_off)
+                    && let Some(y) = y.checked_add_signed(y_off)
+                    && let Some(cell) = grid.get(x, y)
+                    && let Some(e) = cell.cell_entity()
+                {
+                    cell_entities.push(e);
+                }
+            }
+        }
+        if !cell_entities.is_empty() {
+            break;
+        }
+    }
+    if cell_entities.is_empty() {
+        return None;
+    }
+    Some(cell_entities[rng.u64() as usize % cell_entities.len()])
 }

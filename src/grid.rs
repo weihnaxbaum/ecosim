@@ -280,7 +280,7 @@ impl Cell {
         };
     }
 
-    fn cell_entity(&self) -> Option<Entity> {
+    pub fn cell_entity(&self) -> Option<Entity> {
         match *self {
             Self::Normal { cell_entity } => cell_entity,
             Self::Safe { cell_entity, .. } => cell_entity,
