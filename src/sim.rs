@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{fs, time::Instant};
 
 use bevy::{platform::collections::HashSet, prelude::*};
 
@@ -34,6 +34,36 @@ struct Generation(u32);
 #[derive(Event)]
 struct FinishGeneration;
 
+#[derive(Resource, Default)]
+pub struct HistoricalData {
+    survivors: Vec<u32>,
+    diversity: Vec<f32>,
+    mutation_rate: Vec<f32>,
+}
+
+impl HistoricalData {
+    pub fn write(&self, entity_count: usize, rng: &mut Rng) {
+        let mut csv =
+            format!("Generation,Survivors (n/{entity_count}),Diversity,Avg. Mutation Rate\n");
+        for i in 0..self.survivors.len() {
+            csv += &format!(
+                "{i},{},{:.3},{:.3}\n",
+                self.survivors[i], self.diversity[i], self.mutation_rate[i]
+            );
+        }
+        if !fs::exists("output").unwrap_or(false) {
+            if let Err(e) = fs::create_dir("output") {
+                error!("{e}");
+            }
+        }
+        // TODO: use time stamp
+        let name = format!("output/data-{:0x}.csv", rng.u64());
+        if let Err(e) = fs::write(name, csv) {
+            error!("{e}");
+        }
+    }
+}
+
 #[derive(Component)]
 struct GenerationLabel;
 
@@ -44,8 +74,8 @@ struct SurvivorsLabel;
 struct DiversityLabel;
 
 impl DiversityLabel {
-    fn text(nets: &[&Net]) -> String {
-        format!("Diversity: {:.3}", Self::calc(nets))
+    fn text(diversity: f32) -> String {
+        format!("Diversity: {diversity:.3}")
     }
 
     // mean of root mean square deviations
@@ -70,8 +100,8 @@ impl DiversityLabel {
 struct MutationRateLabel;
 
 impl MutationRateLabel {
-    fn text(nets: &[&Net]) -> String {
-        format!("Avg mutation rate: {:.3}", Self::calc(nets))
+    fn text(mutation_rate: f32) -> String {
+        format!("Avg mutation rate: {mutation_rate:.3}")
     }
 
     fn calc(nets: &[&Net]) -> f32 {
@@ -123,6 +153,7 @@ fn setup_sim(
     commands.insert_resource(Tick(0));
     commands.insert_resource(DesiredTps(60.0));
     commands.insert_resource(Generation(0));
+    commands.init_resource::<HistoricalData>();
 
     commands.spawn((
         GenerationLabel,
@@ -150,7 +181,7 @@ fn setup_sim(
 
     commands.spawn((
         DiversityLabel,
-        Text2d(DiversityLabel::text(&nets)),
+        Text2d(DiversityLabel::text(DiversityLabel::calc(&nets))),
         TextFont {
             font_size: 40.0,
             ..default()
@@ -161,7 +192,7 @@ fn setup_sim(
 
     commands.spawn((
         MutationRateLabel,
-        Text2d(MutationRateLabel::text(&nets)),
+        Text2d(MutationRateLabel::text(MutationRateLabel::calc(&nets))),
         TextFont {
             font_size: 40.0,
             ..default()
@@ -298,6 +329,7 @@ fn finish_generation(
             Without<SurvivorsLabel>,
         ),
     >,
+    mut historical_data: ResMut<HistoricalData>,
     mut tick: ResMut<Tick>,
     entity_count: Res<EntityCount>,
     grid_size: Res<GridSize>,
@@ -318,9 +350,6 @@ fn finish_generation(
         commands.set_state(SimState::Stopped);
         return;
     }
-
-    dbg!(survivors.len());
-    dbg!(survivors[0].net.output());
 
     let mut pos = HashSet::with_capacity(entity_count.get());
     let mut ce = Vec::with_capacity(entity_count.get());
@@ -347,8 +376,15 @@ fn finish_generation(
     }
 
     let nets: Vec<_> = ce.iter().map(|ce| &ce.net).collect();
-    diversity_label.0 = DiversityLabel::text(&nets);
-    mutation_rate_label.0 = MutationRateLabel::text(&nets);
+    let diversity = DiversityLabel::calc(&nets);
+    let mutation_rate = MutationRateLabel::calc(&nets);
+
+    historical_data.survivors.push(survivors.len() as u32);
+    historical_data.diversity.push(diversity);
+    historical_data.mutation_rate.push(mutation_rate);
+
+    diversity_label.0 = DiversityLabel::text(diversity);
+    mutation_rate_label.0 = MutationRateLabel::text(mutation_rate);
 
     grid.clear_entities();
 

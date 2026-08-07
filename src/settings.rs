@@ -3,8 +3,9 @@ use std::mem;
 use bevy::prelude::*;
 
 use crate::{
-    AppState, WIN_HEIGHT,
+    AppState, Rng, WIN_HEIGHT,
     grid::{CellConfigIndicator, CellType, Grid},
+    sim::HistoricalData,
     ui::{ActionButton, Focus, Focusable, TextInput},
 };
 
@@ -437,13 +438,25 @@ fn return_to_settings_on_esc(
     kb: Res<ButtonInput<KeyCode>>,
     app_state: Res<State<AppState>>,
     settings_state: Option<Res<State<SettingsState>>>,
+    historical_data: Option<Res<HistoricalData>>,
+    entity_count: Res<EntityCount>,
+    rng: Option<ResMut<Rng>>,
     mut commands: Commands,
 ) {
-    if (*app_state.get() != AppState::Settings
-        || *settings_state.unwrap().get() == SettingsState::Grid)
-        && kb.pressed(KeyCode::Escape)
+    if !kb.pressed(KeyCode::Escape)
+        || *app_state.get() == AppState::Settings
+            && *settings_state.unwrap().get() == SettingsState::Parameters
     {
-        commands.set_state(AppState::Settings);
-        commands.set_state(SettingsState::Parameters);
+        return;
     }
+
+    if let Some(historical_data) = historical_data {
+        match rng {
+            Some(mut rng) => historical_data.write(entity_count.0, &mut rng),
+            None => error!("RNG not initialized"),
+        };
+        commands.remove_resource::<HistoricalData>();
+    }
+    commands.set_state(AppState::Settings);
+    commands.set_state(SettingsState::Parameters);
 }
