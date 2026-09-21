@@ -17,3 +17,8 @@ Evolutional training of neural-network-controlled entities on a grid inspired by
 1. **General Settings:** use arrows to move, type the values in, select the button and press enter to continue
 2. **Grid Setup:** use space to toggle modes, drag on the grid to paint areas, press enter to contiune
 3. **Simulation:** type the desired TPS in and press enter to change the simulation speed, press escape to exit to settings
+
+## Building
+
+1. Install [Bevy's dependencies](https://bevy.org/learn/quick-start/getting-started/setup/#installing-os-dependencies)
+2. `cargo build` or `cargo run`
